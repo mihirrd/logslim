@@ -3,7 +3,6 @@ package com.logslim.storage;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
@@ -31,17 +30,17 @@ public class RawLogDao {
         String sql = """
                 INSERT INTO raw_logs (content, log_timestamp, source, created_at)
                 VALUES (:content, :logTs, :source, :createdAt)
+                RETURNING log_id
                 """;
         Instant now = Instant.now();
         var params = new MapSqlParameterSource()
-                .addValue("content", rawLog.getContent())
-                .addValue("logTs",   InstantUtil.format(rawLog.getLogTimestamp()))
-                .addValue("source",  rawLog.getSource())
+                .addValue("content",   rawLog.getContent())
+                .addValue("logTs",     InstantUtil.format(rawLog.getLogTimestamp()))
+                .addValue("source",    rawLog.getSource())
                 .addValue("createdAt", InstantUtil.format(rawLog.getCreatedAt() != null ? rawLog.getCreatedAt() : now));
 
-        var keyHolder = new GeneratedKeyHolder();
-        jdbc.update(sql, params, keyHolder, new String[]{"log_id"});
-        rawLog.setId(keyHolder.getKey().longValue());
+        Long id = jdbc.queryForObject(sql, params, Long.class);
+        rawLog.setId(id);
         return rawLog;
     }
 

@@ -33,9 +33,9 @@ public class ClearCommand implements Runnable {
             }
         }
 
-        int entries = jdbc.update("DELETE FROM log_entries", Map.of());
-        int templates = jdbc.update("DELETE FROM templates", Map.of());
-        int raw = jdbc.update("DELETE FROM raw_logs", Map.of());
+        int entries   = jdbc.update("DELETE FROM log_entries", Map.of());
+        int templates = jdbc.update("DELETE FROM templates",   Map.of());
+        int raw       = jdbc.update("DELETE FROM raw_logs",    Map.of());
 
         System.out.printf("Cleared: %d log entries, %d templates, %d raw logs.%n",
                 entries, templates, raw);

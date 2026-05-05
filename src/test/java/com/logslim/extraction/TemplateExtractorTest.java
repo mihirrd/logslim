@@ -16,21 +16,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest
 @TestPropertySource(properties = {
         // Single-connection pool so all threads share the same in-memory SQLite DB
-        "spring.datasource.url=jdbc:sqlite::memory:",
+        "spring.datasource.url=jdbc:duckdb:",
         "spring.datasource.hikari.maximum-pool-size=1",
-        "logslim.template.similarity-threshold=0.95",
-        "logslim.template.max-count=10"
+        "logslim.template.max-count=10",
+        // Lock templates immediately so existing tests see first-occurrence behaviour
+        "logslim.drain.lock-after-n=1",
+        // Stricter threshold so lines differing by one static token are not merged
+        "logslim.drain.sim-threshold=0.6"
 })
 class TemplateExtractorTest {
 
     @Autowired TemplateExtractor extractor;
     @Autowired TemplateDao templateDao;
-    @Autowired TemplateCache templateCache;
     @Autowired NamedParameterJdbcTemplate jdbc;
 
     @BeforeEach
     void cleanDb() {
-        templateCache.clearAll();
+        extractor.reset();
         jdbc.update("DELETE FROM log_entries", Map.of());
         jdbc.update("DELETE FROM templates",   Map.of());
         jdbc.update("DELETE FROM raw_logs",    Map.of());

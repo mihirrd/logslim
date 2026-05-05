@@ -1,9 +1,11 @@
 package com.logslim.integration;
 
-import com.logslim.extraction.TemplateCache;
 import com.logslim.extraction.TemplateExtractor;
+import com.logslim.ingestion.LogGroup;
 import com.logslim.query.LogQueryService;
 import com.logslim.query.TemplateQueryService;
+import com.logslim.reconstruction.LogReconstructor;
+import com.logslim.storage.LogEntry;
 import com.logslim.storage.LogEntryDao;
 import com.logslim.storage.TemplateDao;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +16,7 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.*;
 import java.util.stream.IntStream;
 
@@ -29,19 +32,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest
 @TestPropertySource(properties = {
-        "spring.datasource.url=jdbc:sqlite::memory:",
+        "spring.datasource.url=jdbc:duckdb:",
         "spring.datasource.hikari.maximum-pool-size=1",
-        "logslim.template.similarity-threshold=0.95",
-        "logslim.template.max-count=100000"
+        "logslim.template.max-count=100000",
+        "logslim.drain.lock-after-n=1",
+        "logslim.drain.sim-threshold=0.6"
 })
 class EndToEndPipelineTest {
 
-    @Autowired TemplateExtractor extractor;
-    @Autowired TemplateDao templateDao;
-    @Autowired LogEntryDao logEntryDao;
-    @Autowired TemplateCache templateCache;
+    @Autowired TemplateExtractor  extractor;
+    @Autowired TemplateDao        templateDao;
+    @Autowired LogEntryDao        logEntryDao;
     @Autowired TemplateQueryService templateQueryService;
-    @Autowired LogQueryService logQueryService;
+    @Autowired LogQueryService    logQueryService;
+    @Autowired LogReconstructor   reconstructor;
     @Autowired NamedParameterJdbcTemplate jdbc;
 
     private static final int INSTANCES_PER_TEMPLATE = 2000;
@@ -57,7 +61,7 @@ class EndToEndPipelineTest {
 
     @BeforeEach
     void cleanDb() {
-        templateCache.clearAll();
+        extractor.reset();
         jdbc.update("DELETE FROM log_entries", Map.of());
         jdbc.update("DELETE FROM templates",   Map.of());
         jdbc.update("DELETE FROM raw_logs",    Map.of());
@@ -147,5 +151,23 @@ class EndToEndPipelineTest {
         extractor.process("User 99 failed login",     "test");
         extractor.process("User 99 succeeded login",  "test");
         assertThat(templateDao.count()).isEqualTo(2);
+    }
+
+    @Test
+    void multilineContinuation_reconstructsByteExactly() {
+        String header = "ERROR 500 database connection failed";
+        List<String> continuations = List.of(
+                "\tat com.example.Dao.find(Dao.java:42)",
+                "\tat com.example.Svc.get(Svc.java:18)",
+                "Caused by: java.sql.SQLException: timeout");
+
+        extractor.process(new LogGroup(header, continuations, "test"));
+
+        List<LogEntry> entries = logEntryDao.findByTimeRange(Instant.EPOCH, Instant.now());
+        assertThat(entries).hasSize(1);
+
+        String reconstructed = reconstructor.reconstruct(entries.get(0));
+        String expected = header + "\n" + String.join("\n", continuations);
+        assertThat(reconstructed).isEqualTo(expected);
     }
 }

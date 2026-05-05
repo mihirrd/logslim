@@ -3,7 +3,6 @@ package com.logslim.storage;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
@@ -32,6 +31,7 @@ public class TemplateDao {
         String sql = """
                 INSERT INTO templates (pattern, occurrences, created_at, updated_at)
                 VALUES (:pattern, :occurrences, :createdAt, :updatedAt)
+                RETURNING template_id
                 """;
         var params = new MapSqlParameterSource()
                 .addValue("pattern", template.getPattern())
@@ -39,9 +39,8 @@ public class TemplateDao {
                 .addValue("createdAt", InstantUtil.format(template.getCreatedAt()))
                 .addValue("updatedAt", InstantUtil.format(template.getUpdatedAt()));
 
-        var keyHolder = new GeneratedKeyHolder();
-        jdbc.update(sql, params, keyHolder, new String[]{"template_id"});
-        template.setId(keyHolder.getKey().longValue());
+        Long id = jdbc.queryForObject(sql, params, Long.class);
+        template.setId(id);
         return template;
     }
 
@@ -80,6 +79,10 @@ public class TemplateDao {
                 .addValue("limit", limit)
                 .addValue("since", since == null ? null : InstantUtil.format(since));
         return jdbc.query(sql, params, ROW_MAPPER);
+    }
+
+    public List<Template> findAll() {
+        return jdbc.query("SELECT * FROM templates ORDER BY template_id", Map.of(), ROW_MAPPER);
     }
 
     public long count() {

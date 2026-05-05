@@ -7,7 +7,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -43,11 +42,10 @@ public class LogEntryDao {
         String sql = """
                 INSERT INTO log_entries (template_id, log_timestamp, parameter_values, continuation_text)
                 VALUES (:templateId, :logTs, :params, :continuation)
+                RETURNING entry_id
                 """;
-        var p = entryToParams(entry);
-        var keyHolder = new GeneratedKeyHolder();
-        jdbc.update(sql, p, keyHolder, new String[]{"entry_id"});
-        entry.setId(keyHolder.getKey().longValue());
+        Long id = jdbc.queryForObject(sql, entryToParams(entry), Long.class);
+        entry.setId(id);
         return entry;
     }
 

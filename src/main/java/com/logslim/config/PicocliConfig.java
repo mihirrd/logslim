@@ -16,7 +16,8 @@ public class PicocliConfig {
                                    InspectCommand inspect,
                                    QueryCommand query,
                                    ReplayCommand replay,
-                                   ClearCommand clear) {
+                                   ClearCommand clear,
+                                   CompactCommand compact) {
         CommandLine cmd = new CommandLine(new LogSlimCommand(), factory);
         cmd.addSubcommand("run",       run);
         cmd.addSubcommand("templates", templates);
@@ -24,6 +25,7 @@ public class PicocliConfig {
         cmd.addSubcommand("query",     query);
         cmd.addSubcommand("replay",    replay);
         cmd.addSubcommand("clear",     clear);
+        cmd.addSubcommand("compact",   compact);
         return cmd;
     }
 
