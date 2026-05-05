@@ -27,7 +27,16 @@ public class LogReconstructor {
         Template template = templateDao.findById(entry.getTemplateId())
                 .orElseThrow(() -> new ReconstructionException(
                         "Template not found for id=" + entry.getTemplateId()));
-        return reconstruct(template.getPattern(), entry.getParameters());
+        String header = reconstruct(template.getPattern(), entry.getParameters());
+
+        Map<String, String> meta = entry.getMetadata();
+        if (meta != null) {
+            String continuation = meta.get(LogEntry.CONTINUATION_KEY);
+            if (continuation != null && !continuation.isEmpty()) {
+                return header + "\n" + continuation;
+            }
+        }
+        return header;
     }
 
     /**

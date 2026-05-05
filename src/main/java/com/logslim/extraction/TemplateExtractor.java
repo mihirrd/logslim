@@ -1,5 +1,6 @@
 package com.logslim.extraction;
 
+import com.logslim.ingestion.LogGroup;
 import com.logslim.parsing.LogTokenizer;
 import com.logslim.parsing.ParsedLog;
 import com.logslim.storage.*;
@@ -92,11 +93,58 @@ public class TemplateExtractor {
     }
 
     /**
-     * Process a batch of raw log lines. More efficient than calling process() in a loop
-     * when dealing with high-throughput ingestion.
+     * Process a LogGroup: templates the header line, stores continuation lines
+     * (stack trace frames, etc.) verbatim in metadata under CONTINUATION_KEY.
+     */
+    public Template process(LogGroup group) {
+        ParsedLog parsed = tokenizer.tokenize(group.headerLine(), group.source());
+        String normalizedPattern = normalizer.normalize(parsed.tokens());
+
+        Optional<Template> existingOpt = cache.get(normalizedPattern);
+        Template template;
+        if (existingOpt.isPresent()) {
+            template = existingOpt.get();
+            cache.refresh(template);
+        } else {
+            if (templateDao.count() >= maxTemplateCount) {
+                log.warn("Template count at max ({}), falling back to raw storage for: {}",
+                        maxTemplateCount,
+                        group.headerLine().length() > 80
+                                ? group.headerLine().substring(0, 80) : group.headerLine());
+                storeRaw(group.headerLine(), group.source(), parsed.timestamp());
+                return null;
+            }
+            template = cache.put(Template.newTemplate(normalizedPattern));
+            log.debug("New template created: [{}] {}", template.getId(), normalizedPattern);
+        }
+
+        Map<String, String> params = normalizer.extractParameters(parsed.tokens());
+
+        Map<String, String> meta = new java.util.LinkedHashMap<>();
+        if (group.source() != null) meta.put("source", group.source());
+        if (group.isMultiLine()) {
+            meta.put(LogEntry.CONTINUATION_KEY, String.join("\n", group.continuationLines()));
+        }
+
+        LogEntry entry = new LogEntry(null, template.getId(), parsed.timestamp(), params, meta, Instant.now());
+        logEntryDao.insert(entry);
+        return template;
+    }
+
+    /**
+     * Process a batch of LogGroups.
+     */
+    public void processBatch(List<LogGroup> groups) {
+        groups.forEach(this::process);
+    }
+
+    /**
+     * Process a batch of raw log lines (backward-compatible: wraps each as a single-line LogGroup).
      */
     public void processBatch(List<String> rawLines, String source) {
-        rawLines.forEach(line -> process(line, source));
+        rawLines.stream()
+                .map(line -> LogGroup.singleLine(line, source))
+                .forEach(this::process);
     }
 
     private void storeRaw(String content, String source, Instant ts) {

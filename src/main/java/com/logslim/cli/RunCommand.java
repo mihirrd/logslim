@@ -1,6 +1,8 @@
 package com.logslim.cli;
 
 import com.logslim.extraction.TemplateExtractor;
+import com.logslim.ingestion.LogGroup;
+import com.logslim.ingestion.MultiLineGrouper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -35,26 +37,24 @@ public class RunCommand implements Runnable {
     public void run() {
         try (BufferedReader reader = openReader()) {
             String source = "-".equals(inputPath) ? "stdin" : inputPath;
-            List<String> batch = new ArrayList<>(batchSize);
+            List<LogGroup> batch = new ArrayList<>(batchSize);
             long total = 0;
-            String line;
 
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) continue;
-                batch.add(line);
+            for (LogGroup group : new MultiLineGrouper(reader, source)) {
+                batch.add(group);
                 if (batch.size() >= batchSize) {
-                    extractor.processBatch(batch, source);
+                    extractor.processBatch(batch);
                     total += batch.size();
                     batch.clear();
-                    System.out.printf("\rIngested %,d lines...", total);
+                    System.out.printf("\rIngested %,d groups...", total);
                 }
             }
             if (!batch.isEmpty()) {
-                extractor.processBatch(batch, source);
+                extractor.processBatch(batch);
                 total += batch.size();
             }
-            System.out.printf("%nDone. Ingested %,d lines.%n", total);
-        } catch (IOException e) {
+            System.out.printf("%nDone. Ingested %,d groups.%n", total);
+        } catch (IOException | UncheckedIOException e) {
             System.err.println("Error reading input: " + e.getMessage());
             System.exit(1);
         }

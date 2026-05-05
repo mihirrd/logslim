@@ -5,6 +5,8 @@ import java.util.Map;
 
 public class LogEntry {
 
+    public static final String CONTINUATION_KEY = "__continuation__";
+
     private Long id;
     private long templateId;
     private Instant logTimestamp;

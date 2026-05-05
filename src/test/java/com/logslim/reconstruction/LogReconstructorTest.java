@@ -1,8 +1,13 @@
 package com.logslim.reconstruction;
 
+import com.logslim.storage.LogEntry;
+import com.logslim.storage.Template;
+import com.logslim.storage.TemplateDao;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -78,6 +83,39 @@ class LogReconstructorTest {
         assertRoundTrip("A {num} B {num} C {num}",
                 Map.of("num", "1", "num_1", "2", "num_2", "3"),
                 "A 1 B 2 C 3");
+    }
+
+    @Test
+    void multiLineEntry_reconstructsFullBlock() {
+        Template tmpl = new Template(1L, "ERROR {num} - DB failed", 1L, Instant.now(), Instant.now());
+        TemplateDao dao = new TemplateDao(null) {
+            @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
+        };
+
+        Map<String, String> meta = new java.util.LinkedHashMap<>();
+        meta.put("source", "test");
+        meta.put(LogEntry.CONTINUATION_KEY,
+                "\tat com.example.Dao.find(Dao.java:42)\n\tat com.example.Svc.get(Svc.java:18)");
+        LogEntry entry = new LogEntry(1L, 1L, Instant.now(), Map.of("num", "42"), meta, Instant.now());
+
+        String result = new LogReconstructor(dao).reconstruct(entry);
+        assertThat(result).isEqualTo(
+                "ERROR 42 - DB failed\n\tat com.example.Dao.find(Dao.java:42)\n\tat com.example.Svc.get(Svc.java:18)");
+    }
+
+    @Test
+    void singleLineEntry_noTrailingNewline() {
+        Template tmpl = new Template(2L, "INFO server started", 1L, Instant.now(), Instant.now());
+        TemplateDao dao = new TemplateDao(null) {
+            @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
+        };
+
+        LogEntry entry = new LogEntry(1L, 2L, Instant.now(), Map.of(),
+                Map.of("source", "test"), Instant.now());
+
+        String result = new LogReconstructor(dao).reconstruct(entry);
+        assertThat(result).isEqualTo("INFO server started");
+        assertThat(result).doesNotContain("\n");
     }
 
     private void assertRoundTrip(String pattern, Map<String, String> params, String expected) {
