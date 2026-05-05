@@ -4,7 +4,7 @@ LogSlim is a lossless log deduplication engine. It extracts repeating templates 
 
 ## Prerequisites
 
-- Java 17+
+- Java 21+
 - Maven 3.8+
 
 ## Build

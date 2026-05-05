@@ -92,7 +92,7 @@ def generate_log(start_time):
         return f"{timestamp} | {service} | {level} | {message}"
 
 
-COUNT = 1000
+COUNT = 100000
 def generate_logs(n=COUNT, output_file="app_multiline.log"):
     start_time = datetime.now() - timedelta(days=1)
 

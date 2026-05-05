@@ -46,7 +46,12 @@ public class InspectCommand implements Runnable {
         }
         System.out.println("Recent entries:");
         for (LogEntry e : detail.recentEntries()) {
-            System.out.printf("  %s  %s%n", e.getLogTimestamp(), e.getParameters());
+            System.out.printf("  %s  %s%n", e.getLogTimestamp(), e.getParameterValues());
+            if (e.getContinuationText() != null && !e.getContinuationText().isEmpty()) {
+                for (String line : e.getContinuationText().split("\n")) {
+                    System.out.println("    " + line);
+                }
+            }
         }
     }
 }

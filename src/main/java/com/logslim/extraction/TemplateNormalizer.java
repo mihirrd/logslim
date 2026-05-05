@@ -3,6 +3,7 @@ package com.logslim.extraction;
 import com.logslim.parsing.Token;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -55,6 +56,39 @@ public class TemplateNormalizer {
         if (eq > 0 && eq < value.length() - 1)
             return "{" + value.substring(0, eq) + "}";
         return "{num}";
+    }
+
+    /**
+     * Extract dynamic token values as an ordered list for compact storage.
+     * Position in the list corresponds to position of the placeholder in the pattern.
+     */
+    public List<String> extractParameterValues(List<Token> tokens) {
+        List<String> values = new ArrayList<>();
+        for (Token t : tokens) {
+            if (t.isDynamic()) values.add(t.value());
+        }
+        return values;
+    }
+
+    /**
+     * Rebuild the named parameter map from a stored pattern string and its positional values.
+     * Inverse of extractParameterValues — used at query time for filter matching.
+     */
+    public java.util.Map<String, String> buildParameterMap(String pattern, List<String> values) {
+        java.util.Map<String, String> result = new java.util.LinkedHashMap<>();
+        java.util.Map<String, Integer> counters = new java.util.HashMap<>();
+        int pos = 0;
+        for (String tok : pattern.split("\\s+")) {
+            if (tok.startsWith("{") && tok.endsWith("}")) {
+                String base = tok.substring(1, tok.length() - 1);
+                int count = counters.getOrDefault(base, 0);
+                String key = count == 0 ? base : base + "_" + count;
+                counters.put(base, count + 1);
+                if (pos < values.size()) result.put(key, values.get(pos));
+                pos++;
+            }
+        }
+        return result;
     }
 
     /**

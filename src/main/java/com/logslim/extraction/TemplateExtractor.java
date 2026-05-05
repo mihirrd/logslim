@@ -11,7 +11,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -78,17 +77,9 @@ public class TemplateExtractor {
             log.debug("New template created: [{}] {}", template.getId(), normalizedPattern);
         }
 
-        // 4. Store the log entry (parameters only)
-        Map<String, String> params = normalizer.extractParameters(parsed.tokens());
-        LogEntry entry = new LogEntry(
-                null,
-                template.getId(),
-                parsed.timestamp(),
-                params,
-                source != null ? Map.of("source", source) : Map.of(),
-                Instant.now()
-        );
-        logEntryDao.insert(entry);
+        // 4. Store the log entry
+        List<String> paramValues = normalizer.extractParameterValues(parsed.tokens());
+        logEntryDao.insert(new LogEntry(null, template.getId(), parsed.timestamp(), paramValues, null));
         return template;
     }
 
@@ -118,16 +109,9 @@ public class TemplateExtractor {
             log.debug("New template created: [{}] {}", template.getId(), normalizedPattern);
         }
 
-        Map<String, String> params = normalizer.extractParameters(parsed.tokens());
-
-        Map<String, String> meta = new java.util.LinkedHashMap<>();
-        if (group.source() != null) meta.put("source", group.source());
-        if (group.isMultiLine()) {
-            meta.put(LogEntry.CONTINUATION_KEY, String.join("\n", group.continuationLines()));
-        }
-
-        LogEntry entry = new LogEntry(null, template.getId(), parsed.timestamp(), params, meta, Instant.now());
-        logEntryDao.insert(entry);
+        List<String> paramValues = normalizer.extractParameterValues(parsed.tokens());
+        String continuation = group.isMultiLine() ? String.join("\n", group.continuationLines()) : null;
+        logEntryDao.insert(new LogEntry(null, template.getId(), parsed.timestamp(), paramValues, continuation));
         return template;
     }
 

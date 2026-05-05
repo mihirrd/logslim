@@ -5,10 +5,11 @@ import com.logslim.storage.Template;
 import com.logslim.storage.TemplateDao;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
 
 /**
- * Reconstructs the original log line from a stored template + parameter map.
+ * Reconstructs the original log line from a stored template + parameter values.
  * Invariant: reconstruct(extract(line)).equals(line) for every log line.
  */
 @Component
@@ -27,53 +28,69 @@ public class LogReconstructor {
         Template template = templateDao.findById(entry.getTemplateId())
                 .orElseThrow(() -> new ReconstructionException(
                         "Template not found for id=" + entry.getTemplateId()));
-        String header = reconstruct(template.getPattern(), entry.getParameters());
-
-        Map<String, String> meta = entry.getMetadata();
-        if (meta != null) {
-            String continuation = meta.get(LogEntry.CONTINUATION_KEY);
-            if (continuation != null && !continuation.isEmpty()) {
-                return header + "\n" + continuation;
-            }
-        }
+        String header = reconstruct(template.getPattern(), entry.getParameterValues());
+        String cont = entry.getContinuationText();
+        if (cont != null && !cont.isEmpty()) return header + "\n" + cont;
         return header;
     }
 
     /**
-     * Reconstruct from an explicit pattern + parameter map.
-     * Pattern tokens like {num}, {uuid}, {hash}, {ts} are replaced in left-to-right order
-     * by matching parameter keys. Indexed keys ({num_1}, {uuid_0}, etc.) are resolved first.
+     * Reconstruct from a pattern and positional parameter values.
+     * Placeholders in the pattern ({num}, {uuid}, etc.) are substituted
+     * left-to-right from the values list.
      */
-    public String reconstruct(String pattern, Map<String, String> parameters) {
-        if (!pattern.contains("{")) {
+    public String reconstruct(String pattern, List<String> paramValues) {
+        if (!pattern.contains("{")) return pattern;
+        if (paramValues == null || paramValues.isEmpty()) {
+            if (pattern.contains("{"))
+                throw new ReconstructionException("Missing parameters for pattern: " + pattern);
             return pattern;
-        }
-        if (parameters == null) {
-            parameters = Map.of();
         }
 
         String[] tokens = pattern.split("\\s+");
-        // Track how many times each base placeholder has been consumed
-        java.util.Map<String, Integer> consumed = new java.util.HashMap<>();
+        int pos = 0;
         StringBuilder sb = new StringBuilder();
 
         for (int i = 0; i < tokens.length; i++) {
             if (i > 0) sb.append(' ');
             String tok = tokens[i];
             if (tok.startsWith("{") && tok.endsWith("}")) {
-                String base = tok.substring(1, tok.length() - 1); // e.g. "num", "uuid"
+                if (pos >= paramValues.size()) {
+                    throw new ReconstructionException(
+                            "Not enough parameter values for pattern: " + pattern);
+                }
+                sb.append(paramValues.get(pos++));
+            } else {
+                sb.append(tok);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Reconstruct from an explicit pattern + named parameter map.
+     * Kept for backward compatibility with tests and query filtering.
+     */
+    public String reconstruct(String pattern, Map<String, String> parameters) {
+        if (!pattern.contains("{")) return pattern;
+        if (parameters == null) parameters = Map.of();
+
+        String[] tokens = pattern.split("\\s+");
+        Map<String, Integer> consumed = new java.util.HashMap<>();
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0; i < tokens.length; i++) {
+            if (i > 0) sb.append(' ');
+            String tok = tokens[i];
+            if (tok.startsWith("{") && tok.endsWith("}")) {
+                String base = tok.substring(1, tok.length() - 1);
                 int count = consumed.getOrDefault(base, 0);
-                // Look up: first try "base" (count==0), then "base_1", "base_2", …
                 String key = count == 0 ? base : base + "_" + count;
                 String value = parameters.get(key);
-                if (value == null) {
-                    // Fallback: try exact token without braces
-                    value = parameters.get(tok);
-                }
-                if (value == null) {
+                if (value == null) value = parameters.get(tok);
+                if (value == null)
                     throw new ReconstructionException(
                             "Missing parameter '" + key + "' for pattern: " + pattern);
-                }
                 consumed.put(base, count + 1);
                 sb.append(value);
             } else {

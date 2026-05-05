@@ -93,7 +93,7 @@ def generate_logs(n=100):
     logs = [generate_log(start_time) for _ in range(n)]
     return logs
 
-COUNT = 1000
+COUNT = 100000
 if __name__ == "__main__":
     logs = generate_logs(COUNT)
 

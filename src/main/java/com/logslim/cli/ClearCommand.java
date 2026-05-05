@@ -8,13 +8,12 @@ import picocli.CommandLine.Option;
 import java.util.Map;
 
 @Component
-@Command(name = "clear", mixinStandardHelpOptions = true,
-         description = "Delete all data from the database (templates, log entries, raw logs).")
+@Command(name = "clear", mixinStandardHelpOptions = true, description = "Delete all data from the database (templates, log entries, raw logs).")
 public class ClearCommand implements Runnable {
 
     private final NamedParameterJdbcTemplate jdbc;
 
-    @Option(names = {"--yes", "-y"}, description = "Skip confirmation prompt")
+    @Option(names = { "--yes", "-y" }, description = "Skip confirmation prompt")
     private boolean yes;
 
     public ClearCommand(NamedParameterJdbcTemplate jdbc) {
@@ -34,9 +33,9 @@ public class ClearCommand implements Runnable {
             }
         }
 
-        int entries   = jdbc.update("DELETE FROM log_entries", Map.of());
-        int templates = jdbc.update("DELETE FROM templates",   Map.of());
-        int raw       = jdbc.update("DELETE FROM raw_logs",    Map.of());
+        int entries = jdbc.update("DELETE FROM log_entries", Map.of());
+        int templates = jdbc.update("DELETE FROM templates", Map.of());
+        int raw = jdbc.update("DELETE FROM raw_logs", Map.of());
 
         System.out.printf("Cleared: %d log entries, %d templates, %d raw logs.%n",
                 entries, templates, raw);

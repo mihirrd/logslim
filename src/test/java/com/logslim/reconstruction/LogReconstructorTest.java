@@ -6,6 +6,7 @@ import com.logslim.storage.TemplateDao;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -44,7 +45,7 @@ class LogReconstructorTest {
 
     @Test
     void nullParams_returnsPatternAsIs() {
-        String result = reconstructor.reconstruct("server started", null);
+        String result = reconstructor.reconstruct("server started", (Map<String, String>) null);
         assertThat(result).isEqualTo("server started");
     }
 
@@ -92,11 +93,8 @@ class LogReconstructorTest {
             @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
         };
 
-        Map<String, String> meta = new java.util.LinkedHashMap<>();
-        meta.put("source", "test");
-        meta.put(LogEntry.CONTINUATION_KEY,
+        LogEntry entry = new LogEntry(1L, 1L, Instant.now(), List.of("42"),
                 "\tat com.example.Dao.find(Dao.java:42)\n\tat com.example.Svc.get(Svc.java:18)");
-        LogEntry entry = new LogEntry(1L, 1L, Instant.now(), Map.of("num", "42"), meta, Instant.now());
 
         String result = new LogReconstructor(dao).reconstruct(entry);
         assertThat(result).isEqualTo(
@@ -110,8 +108,7 @@ class LogReconstructorTest {
             @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
         };
 
-        LogEntry entry = new LogEntry(1L, 2L, Instant.now(), Map.of(),
-                Map.of("source", "test"), Instant.now());
+        LogEntry entry = new LogEntry(1L, 2L, Instant.now(), List.of(), null);
 
         String result = new LogReconstructor(dao).reconstruct(entry);
         assertThat(result).isEqualTo("INFO server started");

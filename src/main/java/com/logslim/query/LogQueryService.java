@@ -1,5 +1,6 @@
 package com.logslim.query;
 
+import com.logslim.extraction.TemplateNormalizer;
 import com.logslim.reconstruction.LogReconstructor;
 import com.logslim.storage.*;
 import org.springframework.stereotype.Service;
@@ -19,13 +20,16 @@ public class LogQueryService {
     private final LogEntryDao logEntryDao;
     private final RawLogDao rawLogDao;
     private final LogReconstructor reconstructor;
+    private final TemplateNormalizer normalizer;
 
     public LogQueryService(TemplateDao templateDao, LogEntryDao logEntryDao,
-                           RawLogDao rawLogDao, LogReconstructor reconstructor) {
+                           RawLogDao rawLogDao, LogReconstructor reconstructor,
+                           TemplateNormalizer normalizer) {
         this.templateDao   = templateDao;
         this.logEntryDao   = logEntryDao;
         this.rawLogDao     = rawLogDao;
         this.reconstructor = reconstructor;
+        this.normalizer    = normalizer;
     }
 
     /**
@@ -44,10 +48,11 @@ public class LogQueryService {
                 .filter(e -> e.getTemplateId() == template.getId())
                 .collect(Collectors.toList());
 
-        // Apply parameter filters
+        // Apply parameter filters (rebuild named map from pattern + positional values)
         if (!filters.isEmpty()) {
+            final Template tmpl = template;
             entries = entries.stream()
-                    .filter(e -> matchesFilters(e.getParameters(), filters))
+                    .filter(e -> matchesFilters(tmpl, e, filters))
                     .collect(Collectors.toList());
         }
 
@@ -81,9 +86,11 @@ public class LogQueryService {
         return lines.stream().map(TimestampedLine::line).collect(Collectors.toList());
     }
 
-    private boolean matchesFilters(Map<String, String> params, Map<String, String> filters) {
+    private boolean matchesFilters(Template template, LogEntry entry, Map<String, String> filters) {
+        Map<String, String> paramMap = normalizer.buildParameterMap(
+                template.getPattern(), entry.getParameterValues());
         return filters.entrySet().stream()
-                .allMatch(f -> f.getValue().equals(params.get(f.getKey())));
+                .allMatch(f -> f.getValue().equals(paramMap.get(f.getKey())));
     }
 
     /**
