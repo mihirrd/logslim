@@ -42,8 +42,14 @@ public class TemplateNormalizer {
             return "{uuid}";
         if (value.matches("\\d{4}-\\d{2}-\\d{2}.*"))
             return "{ts}";
+        if (value.matches("\\d{1,2}:\\d{2}:\\d{2}(\\.\\d+)?"))
+            return "{time}";
         if (value.matches("[0-9a-fA-F]{32,}"))
             return "{hash}";
+        // key=value token: use the key name as the placeholder (e.g. user_id=64 → {user_id})
+        int eq = value.indexOf('=');
+        if (eq > 0 && eq < value.length() - 1)
+            return "{" + value.substring(0, eq) + "}";
         return "{num}";
     }
 

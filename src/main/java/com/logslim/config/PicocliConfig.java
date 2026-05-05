@@ -15,13 +15,15 @@ public class PicocliConfig {
                                    TemplatesCommand templates,
                                    InspectCommand inspect,
                                    QueryCommand query,
-                                   ReplayCommand replay) {
+                                   ReplayCommand replay,
+                                   ClearCommand clear) {
         CommandLine cmd = new CommandLine(new LogSlimCommand(), factory);
         cmd.addSubcommand("run",       run);
         cmd.addSubcommand("templates", templates);
         cmd.addSubcommand("inspect",   inspect);
         cmd.addSubcommand("query",     query);
         cmd.addSubcommand("replay",    replay);
+        cmd.addSubcommand("clear",     clear);
         return cmd;
     }
 
