@@ -46,6 +46,10 @@ public class TemplateNormalizer {
             return "{time}";
         if (value.matches("[0-9a-fA-F]{32,}"))
             return "{hash}";
+        if (value.matches("\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}"))
+            return "{ip}";
+        if (value.matches("[A-Za-z][\\w.-]*\\[\\d+\\]:?"))
+            return "{proc}";
         // key=value token: use the key name as the placeholder (e.g. user_id=64 → {user_id})
         int eq = value.indexOf('=');
         if (eq > 0 && eq < value.length() - 1)

@@ -52,7 +52,7 @@ public class LogTokenizer {
 
     private boolean isPunct(char c) {
         return c == '"' || c == '\'' || c == '(' || c == ')' ||
-               c == '[' || c == ']' || c == '{' || c == '}' ||
+               c == '{' || c == '}' ||
                c == ',' || c == ';' || c == ':';
     }
 }

@@ -27,6 +27,14 @@ public class TokenClassifier {
     private static final Pattern NUMBER =
             Pattern.compile("-?\\d+(\\.\\d+)?%?");
 
+    // IPv4 address  (e.g. 192.168.1.144)
+    private static final Pattern IPV4 =
+            Pattern.compile("\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}");
+
+    // process[PID] or process[PID]:  (e.g. docker[25559], sshd[1234]:)
+    private static final Pattern PROC_PID =
+            Pattern.compile("[A-Za-z][\\w.-]*\\[\\d+\\]:?");
+
     public TokenType classify(String value) {
         if (value == null || value.isEmpty()) {
             return TokenType.STATIC;
@@ -36,6 +44,8 @@ public class TokenClassifier {
         if (TIME.matcher(value).matches())      return TokenType.DYNAMIC;
         if (HEX_HASH.matcher(value).matches())  return TokenType.DYNAMIC;
         if (NUMBER.matcher(value).matches())    return TokenType.DYNAMIC;
+        if (IPV4.matcher(value).matches())      return TokenType.DYNAMIC;
+        if (PROC_PID.matcher(value).matches())  return TokenType.DYNAMIC;
 
         // key=value token (e.g. user_id=64, product_id=abc123): classify by the value part
         int eq = value.indexOf('=');
