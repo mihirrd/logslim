@@ -1,6 +1,7 @@
 package com.logslim.cli;
 
 import com.logslim.query.LogQueryService;
+import com.logslim.storage.Template;
 import org.springframework.stereotype.Component;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -38,7 +39,15 @@ public class QueryCommand implements Runnable {
     public void run() {
         List<String> results = queryService.queryByPattern(pattern, filters, last);
         if (results.isEmpty()) {
-            System.out.println("No matching logs found.");
+            System.out.printf("No template matched \"%s\".%n%n", pattern);
+            List<Template> suggestions = queryService.findSuggestions(pattern, 5);
+            if (!suggestions.isEmpty()) {
+                System.out.println("Did you mean?");
+                for (Template s : suggestions) {
+                    System.out.printf("  [%-4d]  %-40s  (%,d hits)%n",
+                            s.getId(), s.getPattern(), s.getOccurrences());
+                }
+            }
             return;
         }
         results.forEach(System.out::println);

@@ -59,6 +59,12 @@
             <artifactId>spring-boot-starter-cache</artifactId>
         </dependency>
 
+        <!-- Spring Web (REST API for serve mode) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
         <!-- Jackson for parameter JSON serialization -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>

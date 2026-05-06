@@ -8,6 +8,8 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -80,6 +82,20 @@ public class LogQueryService {
 
         lines.sort(java.util.Comparator.comparing(TimestampedLine::timestamp));
         return lines.stream().map(TimestampedLine::line).collect(Collectors.toList());
+    }
+
+    public List<Template> findSuggestions(String queryPattern, int maxResults) {
+        String[] words = queryPattern.split("[\\s{}]+");
+        Map<Long, Template> seen = new LinkedHashMap<>();
+        for (String word : words) {
+            if (word.length() < 3) continue;
+            templateDao.findByPatternContaining(word, maxResults * 2)
+                       .forEach(t -> seen.putIfAbsent(t.getId(), t));
+            if (seen.size() >= maxResults * 3) break;
+        }
+        return seen.values().stream()
+                   .sorted(Comparator.comparingLong(Template::getOccurrences).reversed())
+                   .limit(maxResults).toList();
     }
 
     private boolean matchesFilters(Template template, LogEntry entry, Map<String, String> filters) {

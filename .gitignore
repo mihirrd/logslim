@@ -1,10 +1,24 @@
-# Maven build output
+# Maven
 target/
+.mvn/wrapper/maven-wrapper.jar
+
+# DuckDB
+*.duckdb
+*.duckdb.wal
 logs_data/
 
-*.duckdb
 # Log files
 *.log
+
+# Next.js / Node
+dashboard/.next/
+dashboard/node_modules/
+dashboard/.env
+dashboard/.env.local
+dashboard/.env*.local
+dashboard/npm-debug.log*
+dashboard/yarn-debug.log*
+dashboard/yarn-error.log*
 
 # IDE — IntelliJ IDEA
 .idea/
@@ -27,6 +41,3 @@ bin/
 # OS
 .DS_Store
 Thumbs.db
-
-# Maven wrapper (if not committing it intentionally)
-.mvn/wrapper/maven-wrapper.jar

@@ -9,7 +9,9 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
@@ -26,20 +28,12 @@ public class TemplateQueryService {
         this.logEntryDao = logEntryDao;
     }
 
-    /**
-     * List templates sorted by occurrence count, optionally within a time window.
-     * @param window  time window to look back (null = all time)
-     * @param limit   max results (0 = use default page size)
-     */
     public List<Template> listTopTemplates(Duration window, int limit) {
         Instant since = window != null ? Instant.now().minus(window) : null;
         int effectiveLimit = limit > 0 ? limit : defaultPageSize;
         return templateDao.findTopN(since, effectiveLimit);
     }
 
-    /**
-     * Fetch a single template by its numeric ID together with its most recent entries.
-     */
     public Optional<TemplateDetail> getTemplate(long templateId, int recentCount) {
         return templateDao.findById(templateId).map(template -> {
             int n = recentCount > 0 ? recentCount : 10;
@@ -48,5 +42,43 @@ public class TemplateQueryService {
         });
     }
 
+    public Optional<TemplateDetailFull> getTemplateFull(long templateId, int recentCount) {
+        return templateDao.findById(templateId).map(template -> {
+            List<LogEntry> recent = logEntryDao.findByTemplateId(templateId,
+                    Math.max(recentCount, 10));
+            List<SlotStats> stats = buildSlotStats(template, templateId);
+            return new TemplateDetailFull(template, recent, stats);
+        });
+    }
+
+    public List<Template> searchTemplates(String text, int limit) {
+        return templateDao.findByPatternContaining(text, limit);
+    }
+
+    private List<SlotStats> buildSlotStats(Template template, long templateId) {
+        List<SlotStats> result = new ArrayList<>();
+        int slotIndex = 0;
+        for (String token : template.getPattern().split("\\s+")) {
+            if (token.startsWith("{") && token.endsWith("}")) {
+                String raw = token.substring(1, token.length() - 1);
+                int u = raw.lastIndexOf('_');
+                String type = (u > 0 && raw.substring(u + 1).matches("\\d+"))
+                              ? raw.substring(0, u) : raw;
+                long distinct = logEntryDao.countDistinctForSlot(templateId, slotIndex);
+                List<Map.Entry<String, Long>> top =
+                        logEntryDao.getTopValuesForSlot(templateId, slotIndex, 3);
+                result.add(new SlotStats(slotIndex, type, distinct, top));
+                slotIndex++;
+            }
+        }
+        return result;
+    }
+
     public record TemplateDetail(Template template, List<LogEntry> recentEntries) {}
+
+    public record SlotStats(int slotIndex, String slotType, long distinctCount,
+                            List<Map.Entry<String, Long>> topValues) {}
+
+    public record TemplateDetailFull(Template template, List<LogEntry> recentEntries,
+                                     List<SlotStats> slotStats) {}
 }

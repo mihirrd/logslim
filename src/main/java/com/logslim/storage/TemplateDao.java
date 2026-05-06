@@ -81,6 +81,14 @@ public class TemplateDao {
         return jdbc.query(sql, params, ROW_MAPPER);
     }
 
+    public List<Template> findByPatternContaining(String text, int limit) {
+        String sql = "SELECT * FROM templates WHERE pattern LIKE '%' || :text || '%' " +
+                     "ORDER BY occurrences DESC LIMIT :limit";
+        return jdbc.query(sql,
+                new MapSqlParameterSource().addValue("text", text).addValue("limit", limit),
+                ROW_MAPPER);
+    }
+
     public List<Template> findAll() {
         return jdbc.query("SELECT * FROM templates ORDER BY template_id", Map.of(), ROW_MAPPER);
     }

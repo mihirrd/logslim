@@ -23,23 +23,30 @@ public class TemplatesCommand implements Runnable {
     @Option(names = {"--limit", "-n"}, description = "Max results (default: 20)", defaultValue = "20")
     private int limit;
 
+    @Option(names = {"--search", "-s"}, description = "Filter templates whose pattern contains this text")
+    private String search;
+
     public TemplatesCommand(TemplateQueryService queryService) {
         this.queryService = queryService;
     }
 
     @Override
     public void run() {
-        List<Template> templates = queryService.listTopTemplates(last, limit);
+        List<Template> templates = (search != null && !search.isBlank())
+                ? queryService.searchTemplates(search, limit)
+                : queryService.listTopTemplates(last, limit);
+
         if (templates.isEmpty()) {
             System.out.println("No templates found.");
             return;
         }
 
-        System.out.printf("%-6s  %-10s  %s%n", "ID", "OCCURRENCES", "PATTERN");
-        System.out.println("-".repeat(72));
+        System.out.printf("  %-6s  %-6s  %-13s  %s%n", "ID", "HITS", "LAST SEEN", "PATTERN");
+        System.out.println("  " + "─".repeat(70));
         for (Template t : templates) {
-            System.out.printf("[%-4d]  %-10d  %s%n",
-                    t.getId(), t.getOccurrences(), t.getPattern());
+            System.out.printf("  [%-4d]  %-6d  %-13s  %s%n",
+                    t.getId(), t.getOccurrences(),
+                    TimeFormatter.relativeTime(t.getUpdatedAt()), t.getPattern());
         }
     }
 }

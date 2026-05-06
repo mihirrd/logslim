@@ -44,6 +44,11 @@ public class RawLogDao {
         return rawLog;
     }
 
+    public long count() {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM raw_logs", Map.of(), Long.class);
+        return n == null ? 0 : n;
+    }
+
     public List<RawLog> findByTimeRange(Instant from, Instant to) {
         String sql = """
                 SELECT * FROM raw_logs

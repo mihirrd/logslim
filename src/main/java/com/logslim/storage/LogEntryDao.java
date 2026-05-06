@@ -11,6 +11,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +73,11 @@ public class LogEntryDao {
         return jdbc.query(sql, Map.of("templateId", templateId, "limit", limit), ROW_MAPPER);
     }
 
+    public long count() {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM log_entries", Map.of(), Long.class);
+        return n == null ? 0 : n;
+    }
+
     public List<LogEntry> findByTimeRange(Instant from, Instant to) {
         String sql = """
                 SELECT * FROM log_entries
@@ -81,6 +87,24 @@ public class LogEntryDao {
         return jdbc.query(sql,
                 Map.of("from", from.toEpochMilli(), "to", to.toEpochMilli()),
                 ROW_MAPPER);
+    }
+
+    public List<Map.Entry<String, Long>> getTopValuesForSlot(long templateId, int slotIndex, int topN) {
+        String sql = ("SELECT json_extract_string(parameter_values, '$[%d]') AS v, COUNT(*) AS c " +
+                      "FROM log_entries WHERE template_id = :tid " +
+                      "AND json_extract_string(parameter_values, '$[%d]') IS NOT NULL " +
+                      "GROUP BY v ORDER BY c DESC LIMIT :topN").formatted(slotIndex, slotIndex);
+        return jdbc.query(sql,
+                new MapSqlParameterSource().addValue("tid", templateId).addValue("topN", topN),
+                (rs, i) -> new AbstractMap.SimpleEntry<>(rs.getString("v"), rs.getLong("c")));
+    }
+
+    public long countDistinctForSlot(long templateId, int slotIndex) {
+        String sql = ("SELECT COUNT(DISTINCT json_extract_string(parameter_values, '$[%d]')) " +
+                      "FROM log_entries WHERE template_id = :tid").formatted(slotIndex);
+        Long n = jdbc.queryForObject(sql,
+                new MapSqlParameterSource().addValue("tid", templateId), Long.class);
+        return n == null ? 0 : n;
     }
 
     private MapSqlParameterSource entryToParams(LogEntry entry) {
