@@ -66,10 +66,8 @@ public class CompactCommand implements Runnable {
         System.out.println(" done.");
 
         System.out.print("Replacing tables with Parquet-backed views...");
-        // Drop as VIEW first (post-compact re-run), then as TABLE (first-time compact)
         for (String name : List.of("log_entries", "raw_logs", "templates")) {
-            jdbc.execute("DROP VIEW  IF EXISTS " + name);
-            jdbc.execute("DROP TABLE IF EXISTS " + name);
+            dropObject(name);
         }
         jdbc.execute("DROP SEQUENCE IF EXISTS templates_id_seq");
         jdbc.execute("DROP SEQUENCE IF EXISTS log_entries_id_seq");
@@ -92,6 +90,18 @@ public class CompactCommand implements Runnable {
                 mb(dbBefore), mb(dbAfter));
         System.out.printf("  Parquet total:  %6.2f MB%n", mb(parquetTotal));
         System.out.printf("  Total storage:  %6.2f MB%n", mb(dbAfter + parquetTotal));
+    }
+
+    private void dropObject(String name) {
+        String type = jdbc.queryForObject(
+                "SELECT table_type FROM information_schema.tables WHERE table_name = ?",
+                String.class, name);
+        if (type == null) return;
+        if ("VIEW".equals(type)) {
+            jdbc.execute("DROP VIEW " + name);
+        } else {
+            jdbc.execute("DROP TABLE " + name);
+        }
     }
 
     private Path resolveDataDir() {
