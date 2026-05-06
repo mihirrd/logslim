@@ -2,7 +2,7 @@
 
 **Lossless log compression that fits 9 MB of logs into 1.7 MB — without losing a single line.**
 
-LogSlim is a CLI tool that extracts repeating log templates, separates the variable parameters, and stores everything in compressed Parquet files. Every original log line is exactly reconstructable on demand. It sits in front of your existing storage — no agent, no SDK changes, no vendor lock-in.
+LogSlim is a CLI tool and web dashboard that extracts repeating log templates, separates the variable parameters, and stores everything in compressed Parquet files. Every original log line is exactly reconstructable on demand. It sits in front of your existing storage — no agent, no SDK changes, no vendor lock-in.
 
 ---
 
@@ -32,13 +32,13 @@ Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
 
 3. **Storage** separates templates from parameters. A template seen 5,000 times is stored once; only the 4 variable values per occurrence are stored. DuckDB's columnar encoding + zstd compression handles the rest.
 
-4. **`logslim compact`** exports `log_entries` and `raw_logs` to Parquet files and replaces the tables with UNION ALL views. The database stays queryable and writable after compaction.
+4. **`logslim compact`** exports `log_entries` and `raw_logs` to Parquet files and replaces the tables with UNION ALL views. The database stays queryable after compaction.
 
 ---
 
 ## Installation
 
-**Requirements:** Java 17+
+**Requirements:** Java 17+, Node.js 18+ (dashboard only)
 
 ```bash
 # Build from source
@@ -56,7 +56,34 @@ java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-2.0.0.jar run --input 
 
 ---
 
-## Usage
+## Web Dashboard
+
+LogSlim ships with a Next.js dashboard for exploring logs without the CLI.
+
+```bash
+# Terminal 1 — start the API server
+logslim serve
+# → LogSlim API server running on http://localhost:8080
+
+# Terminal 2 — start the dashboard
+cd dashboard && npm install && npm run dev
+# → http://localhost:3000
+```
+
+The dashboard exposes all CLI operations through a browser UI:
+
+- **Dashboard** — storage stats and inline query with pattern search, slot filters, and "did you mean?" suggestions
+- **Templates** — searchable table with hit counts and last-seen timestamps; click any row to inspect
+- **Inspect** — per-slot parameter stats (top values, distinct count) and reconstructed recent log lines
+- **Replay** — relative window (last 1h, 1d…) or absolute range with a calendar and clock picker
+- **Ingest** — paste log content directly into the browser
+- **Settings** — compact database to Parquet or clear all data, both with confirmation dialogs
+
+Only one process can hold the DuckDB write lock at a time. If you run `logslim serve`, stop it before running any other `logslim` command (or pass `-Dlogslim.db.path=` to point each process at a different file).
+
+---
+
+## CLI Usage
 
 ### Ingest logs
 
@@ -80,16 +107,19 @@ Exports all data to `logs_data/` as Parquet (zstd), shrinks the `.duckdb` file t
 ```bash
 logslim templates --limit 10
 
+# Filter by keyword
+logslim templates --search "failed login"
+
 # Filter by time window
 logslim templates --last 1h --limit 5
 ```
 
 ```
-ID      OCCURRENCES  PATTERN
-------------------------------------------------------------------------
-[18  ]  4580        {ts} {time} | INFO | {num} | {num} {num} successfully
-[1   ]  4025        {ts} {time} | {num} | {num} | Cache {num} for key {num}
-[2   ]  3894        {ts} {time} | INFO | {num} | Circuit breaker {num} for service {num}
+ID      HITS   LAST SEEN     PATTERN
+------------------------------------------------------------------------------
+[18  ]  4580   2 min ago    {ts} {time} | INFO | {num} | {num} {num} successfully
+[1   ]  4025   5 min ago    {ts} {time} | {num} | {num} | Cache {num} for key {num}
+[2   ]  3894   12 min ago   {ts} {time} | INFO | {num} | Circuit breaker {num} for service {num}
 ```
 
 ### Inspect a template
@@ -98,7 +128,7 @@ ID      OCCURRENCES  PATTERN
 logslim inspect 18 --recent 5
 ```
 
-Shows the template pattern, total hit count, and the most recent matching log entries with their parameter values.
+Shows the template pattern, total hit count, per-slot parameter stats (top values and distinct count), and the most recent matching log entries reconstructed to their original form.
 
 ### Query by pattern and parameter values
 
@@ -110,11 +140,16 @@ logslim query "User {id} failed login" --last 24h
 logslim query "User {id} failed login" --filter id=456 --last 24h
 ```
 
+If no template matches, LogSlim prints "Did you mean?" suggestions based on the closest patterns in the database.
+
 ### Replay original logs
 
 ```bash
 # Reconstruct and print all logs from the last hour, in timestamp order
 logslim replay --last 1h
+
+# Absolute time range
+logslim replay --from 2024-01-15T00:00:00Z --to 2024-01-15T23:59:59Z
 
 # All logs ever stored
 logslim replay --last 9999d
@@ -165,7 +200,7 @@ java -Dlogslim.drain.lock-after-n=5 -jar logslim-2.0.0.jar run --input app.log
 Pull requests are welcome. Before submitting:
 
 ```bash
-mvn clean test   # all 88 tests must pass
+mvn clean test   # all tests must pass
 ```
 
 The test suite covers:
