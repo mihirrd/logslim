@@ -61,23 +61,19 @@ public class LogQueryService {
                 .collect(Collectors.toList());
     }
 
-    /**
-     * Replay all logs within the given time window in timestamp order.
-     * Merges reconstructed entries from log_entries and raw_logs tables.
-     */
     public List<String> replayLogs(Duration window) {
-        Instant from = window != null ? Instant.now().minus(window) : Instant.EPOCH;
         Instant to   = Instant.now();
+        Instant from = window != null ? to.minus(window) : Instant.EPOCH;
+        return replayLogs(from, to);
+    }
 
+    public List<String> replayLogs(Instant from, Instant to) {
         List<TimestampedLine> lines = new ArrayList<>();
 
-        // Reconstructed logs
         for (LogEntry entry : logEntryDao.findByTimeRange(from, to)) {
-            String line = reconstructor.reconstruct(entry);
-            lines.add(new TimestampedLine(entry.getLogTimestamp(), line));
+            lines.add(new TimestampedLine(entry.getLogTimestamp(), reconstructor.reconstruct(entry)));
         }
 
-        // Raw fallback logs
         for (RawLog raw : rawLogDao.findByTimeRange(from, to)) {
             lines.add(new TimestampedLine(raw.getLogTimestamp(), raw.getContent()));
         }

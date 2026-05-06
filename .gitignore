@@ -1,11 +1,8 @@
 # Maven build output
 target/
+logs_data/
 
-# SQLite database files
-*.db
-*.db-shm
-*.db-wal
-
+*.duckdb
 # Log files
 *.log
 
