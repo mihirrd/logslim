@@ -6,7 +6,8 @@ import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.Map;
 public class AdminController {
 
     private final JdbcTemplate jdbc;
+    private static final Logger logger = LoggerFactory.getLogger(AdminController.class);
 
     @Value("${logslim.db.path:logs.duckdb}")
     private String dbPath;
@@ -27,16 +29,22 @@ public class AdminController {
 
     @PostMapping("/compact")
     public Map<String, Object> compact() {
+        logger.info("Starting compaction process");
         Path dataDir = resolveDataDir();
-        dataDir.toFile().mkdirs();
+        try {
+            dataDir.toFile().mkdirs();
+        } catch (Exception e) {
+            logger.error("Failed to create data directory for compaction: " + dataDir, e);
+            return Map.of("error", "Failed to create data directory: " + e.getMessage());
+        }
 
-        String templatesParquet  = dataDir.resolve("templates.parquet").toAbsolutePath().toString();
+        String templatesParquet = dataDir.resolve("templates.parquet").toAbsolutePath().toString();
         String logEntriesParquet = dataDir.resolve("log_entries.parquet").toAbsolutePath().toString();
-        String rawLogsParquet    = dataDir.resolve("raw_logs.parquet").toAbsolutePath().toString();
+        String rawLogsParquet = dataDir.resolve("raw_logs.parquet").toAbsolutePath().toString();
 
-        jdbc.execute("COPY templates TO '"  + templatesParquet  + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
+        jdbc.execute("COPY templates TO '" + templatesParquet + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
         jdbc.execute("COPY log_entries TO '" + logEntriesParquet + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
-        jdbc.execute("COPY raw_logs TO '"   + rawLogsParquet    + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
+        jdbc.execute("COPY raw_logs TO '" + rawLogsParquet + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
 
         for (String name : List.of("log_entries", "raw_logs", "templates")) {
             dropObject(name);
@@ -45,9 +53,9 @@ public class AdminController {
         jdbc.execute("DROP SEQUENCE IF EXISTS log_entries_id_seq");
         jdbc.execute("DROP SEQUENCE IF EXISTS raw_logs_id_seq");
 
-        jdbc.execute("CREATE VIEW templates   AS SELECT * FROM read_parquet('" + templatesParquet  + "')");
+        jdbc.execute("CREATE VIEW templates   AS SELECT * FROM read_parquet('" + templatesParquet + "')");
         jdbc.execute("CREATE VIEW log_entries AS SELECT * FROM read_parquet('" + logEntriesParquet + "')");
-        jdbc.execute("CREATE VIEW raw_logs    AS SELECT * FROM read_parquet('" + rawLogsParquet    + "')");
+        jdbc.execute("CREATE VIEW raw_logs    AS SELECT * FROM read_parquet('" + rawLogsParquet + "')");
         jdbc.execute("CHECKPOINT");
 
         return Map.of("message", "Compaction complete. Data exported to " + dataDir);
@@ -55,21 +63,21 @@ public class AdminController {
 
     @PostMapping("/clear")
     public Map<String, Object> clear() {
-        int entries   = jdbc.update("DELETE FROM log_entries");
+        int entries = jdbc.update("DELETE FROM log_entries");
         int templates = jdbc.update("DELETE FROM templates");
-        int raw       = jdbc.update("DELETE FROM raw_logs");
+        int raw = jdbc.update("DELETE FROM raw_logs");
         return Map.of(
-            "entriesDeleted",   entries,
-            "templatesDeleted", templates,
-            "rawLogsDeleted",   raw
-        );
+                "entriesDeleted", entries,
+                "templatesDeleted", templates,
+                "rawLogsDeleted", raw);
     }
 
     private void dropObject(String name) {
         String type = jdbc.queryForObject(
                 "SELECT table_type FROM information_schema.tables WHERE table_name = ?",
                 String.class, name);
-        if (type == null) return;
+        if (type == null)
+            return;
         if ("VIEW".equals(type)) {
             jdbc.execute("DROP VIEW " + name);
         } else {
