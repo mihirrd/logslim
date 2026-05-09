@@ -38,6 +38,9 @@ out/
 .settings/
 bin/
 
+# Benchmark working directory
+benchmarks/.work/
+
 # OS
 .DS_Store
 Thumbs.db

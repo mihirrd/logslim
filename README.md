@@ -8,12 +8,37 @@ LogSlim is a CLI tool and web dashboard that extracts repeating log templates, s
 
 ## Benchmarks
 
+Real-world numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3).
+Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.md`.
+
+### Compression (100,000 synthetic log lines, 10 templates, ~7 MB raw)
+
+| Stage | Size |
+|---|---|
+| Source `.log` file | 7.30 MB |
+| After ingest (`.duckdb`) | 16.26 MB |
+| After `compact` (`.duckdb` + Parquet) | **1.71 MB** |
+| Reduction vs source | **76.5%** |
+
+Compression improves with log repetition. Files with fewer distinct templates compress further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. On real production logs we've seen:
+
 | Log file | Original | After compact | Reduction |
 |----------|----------|---------------|-----------|
-| `app_logs.log` (100k lines) | 7.35 MB | **1.49 MB** | **80%** |
-| `app.log` (100k lines) | 9.10 MB | **1.71 MB** | **81%** |
+| `app_logs.log` (100k lines) | 7.35 MB | 1.49 MB | 80% |
+| `app.log` (100k lines) | 9.10 MB | 1.71 MB | 81% |
 
-Compression improves with log repetition. Files with fewer distinct templates (57 vs 159) compress further because DuckDB's dictionary encoding on `template_id` becomes even more efficient.
+### Compact wall time (100,000 rows)
+
+| Operation | Time |
+|---|---|
+| First compact (table → Parquet + hybrid layout) | ~7.2 s |
+| Re-compact (merge 10k-row live tail back into archive) | ~7.5 s |
+
+Compact reads through the unified view and rewrites a single Parquet per table, so cost scales with total row count, not just the size of the new tail.
+
+### Ingestion throughput
+
+For 100k synthetic lines, end-to-end wall time including JVM/Spring startup is ~70 s (≈ 1.5k lines/s). Roughly 10 s of that is fixed startup overhead, so steady-state per-line cost dominates only on larger inputs — `benchmarks/run_all.sh 1000000` is recommended for a meaningful ingestion number.
 
 ---
 
