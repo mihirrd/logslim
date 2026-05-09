@@ -8,13 +8,25 @@ function qs(params: Record<string, string | number | undefined>) {
   return p.toString();
 }
 
+async function get<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`${r.status} ${r.statusText}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+  }
+  return r.json();
+}
+
 async function post<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  if (!r.ok) {
+    const errBody = await r.text().catch(() => "");
+    throw new Error(`${r.status} ${r.statusText}${errBody ? ` — ${errBody.slice(0, 200)}` : ""}`);
+  }
   return r.json();
 }
 
@@ -61,18 +73,16 @@ export interface Suggestion {
 }
 
 export const api = {
-  stats: (): Promise<Stats> =>
-    fetch(`${BASE}/stats`).then((r) => r.json()),
+  stats: (): Promise<Stats> => get(`${BASE}/stats`),
 
   templates: (params: {
     search?: string;
     limit?: number;
     last?: string;
-  }): Promise<TemplateRow[]> =>
-    fetch(`${BASE}/templates?${qs(params)}`).then((r) => r.json()),
+  }): Promise<TemplateRow[]> => get(`${BASE}/templates?${qs(params)}`),
 
   inspect: (id: number, recent = 10): Promise<TemplateDetail> =>
-    fetch(`${BASE}/templates/${id}?recent=${recent}`).then((r) => r.json()),
+    get(`${BASE}/templates/${id}?recent=${recent}`),
 
   query: (body: {
     pattern: string;
@@ -84,11 +94,10 @@ export const api = {
     from?: string;
     to?: string;
     last?: string;
-  }): Promise<string[]> =>
-    fetch(`${BASE}/replay?${qs(params)}`).then((r) => r.json()),
+  }): Promise<string[]> => get(`${BASE}/replay?${qs(params)}`),
 
   suggestions: (pattern: string): Promise<Suggestion[]> =>
-    fetch(`${BASE}/suggestions?pattern=${encodeURIComponent(pattern)}`).then((r) => r.json()),
+    get(`${BASE}/suggestions?pattern=${encodeURIComponent(pattern)}`),
 };
 
 export function relativeTime(epochMs: number): string {

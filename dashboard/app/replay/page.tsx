@@ -14,10 +14,12 @@ export default function ReplayPage() {
   const [to, setTo] = useState<Date | undefined>();
   const [results, setResults] = useState<string[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const run = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
     try {
       let res: string[];
       if (mode === "last") {
@@ -28,7 +30,10 @@ export default function ReplayPage() {
           to: to?.toISOString(),
         });
       }
-      setResults(res);
+      setResults(Array.isArray(res) ? res : []);
+    } catch (err) {
+      setError(String(err));
+      setResults(null);
     } finally {
       setLoading(false);
     }
@@ -98,6 +103,12 @@ export default function ReplayPage() {
           {loading ? "Loading…" : "Replay"}
         </button>
       </form>
+
+      {error && (
+        <div className="mb-4 rounded-xl border border-red-500/20 bg-red-500/5 px-5 py-4">
+          <p className="text-red-400 text-sm">{error}</p>
+        </div>
+      )}
 
       {results !== null && (
         results.length === 0

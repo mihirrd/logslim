@@ -73,11 +73,21 @@ public class LogQueryService {
         List<TimestampedLine> lines = new ArrayList<>();
 
         for (LogEntry entry : logEntryDao.findByTimeRange(from, to)) {
-            lines.add(new TimestampedLine(entry.getLogTimestamp(), reconstructor.reconstruct(entry)));
+            String line;
+            try {
+                line = reconstructor.reconstruct(entry);
+            } catch (RuntimeException e) {
+                line = "[!] reconstruction failed for entry " + entry.getId()
+                        + " (template " + entry.getTemplateId() + "): " + e.getMessage();
+            }
+            Instant ts = entry.getLogTimestamp() != null ? entry.getLogTimestamp() : Instant.EPOCH;
+            lines.add(new TimestampedLine(ts, line));
         }
 
         for (RawLog raw : rawLogDao.findByTimeRange(from, to)) {
-            lines.add(new TimestampedLine(raw.getLogTimestamp(), raw.getContent()));
+            Instant ts = raw.getLogTimestamp() != null ? raw.getLogTimestamp() : Instant.EPOCH;
+            String content = raw.getContent() != null ? raw.getContent() : "";
+            lines.add(new TimestampedLine(ts, content));
         }
 
         lines.sort(java.util.Comparator.comparing(TimestampedLine::timestamp));
