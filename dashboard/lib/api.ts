@@ -94,6 +94,7 @@ export const api = {
     from?: string;
     to?: string;
     last?: string;
+    limit?: number;
   }): Promise<string[]> => get(`${BASE}/replay?${qs(params)}`),
 
   suggestions: (pattern: string): Promise<Suggestion[]> =>

@@ -50,13 +50,20 @@ public class RawLogDao {
     }
 
     public List<RawLog> findByTimeRange(Instant from, Instant to) {
+        return findByTimeRange(from, to, Integer.MAX_VALUE);
+    }
+
+    public List<RawLog> findByTimeRange(Instant from, Instant to, int limit) {
         String sql = """
                 SELECT * FROM raw_logs
                 WHERE log_timestamp >= :from AND log_timestamp <= :to
                 ORDER BY log_timestamp ASC, log_id ASC
+                LIMIT :limit
                 """;
         return jdbc.query(sql,
-                Map.of("from", InstantUtil.format(from), "to", InstantUtil.format(to)),
+                Map.of("from", InstantUtil.format(from),
+                       "to",   InstantUtil.format(to),
+                       "limit", limit),
                 ROW_MAPPER);
     }
 }

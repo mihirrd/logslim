@@ -79,13 +79,18 @@ public class LogEntryDao {
     }
 
     public List<LogEntry> findByTimeRange(Instant from, Instant to) {
+        return findByTimeRange(from, to, Integer.MAX_VALUE);
+    }
+
+    public List<LogEntry> findByTimeRange(Instant from, Instant to, int limit) {
         String sql = """
                 SELECT * FROM log_entries
                 WHERE log_timestamp >= :from AND log_timestamp <= :to
                 ORDER BY log_timestamp ASC, entry_id ASC
+                LIMIT :limit
                 """;
         return jdbc.query(sql,
-                Map.of("from", from.toEpochMilli(), "to", to.toEpochMilli()),
+                Map.of("from", from.toEpochMilli(), "to", to.toEpochMilli(), "limit", limit),
                 ROW_MAPPER);
     }
 

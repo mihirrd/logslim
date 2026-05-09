@@ -36,15 +36,17 @@ public class LogController {
     public List<String> replay(
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to,
-            @RequestParam(required = false) String last) {
+            @RequestParam(required = false) String last,
+            @RequestParam(defaultValue = "5000") int limit) {
 
+        int clamped = Math.max(1, Math.min(limit, 50000));
         if (from != null || to != null) {
             Instant f = from != null ? parseInstant(from) : Instant.EPOCH;
             Instant t = to   != null ? parseInstant(to)   : Instant.now();
-            return queryService.replayLogs(f, t);
+            return queryService.replayLogs(f, t, clamped);
         }
         Duration window = last != null ? parseDuration(last) : null;
-        return queryService.replayLogs(window);
+        return queryService.replayLogs(window, clamped);
     }
 
     @GetMapping("/suggestions")

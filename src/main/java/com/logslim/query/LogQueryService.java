@@ -64,35 +64,73 @@ public class LogQueryService {
     }
 
     public List<String> replayLogs(Duration window) {
+        return replayLogs(window, Integer.MAX_VALUE);
+    }
+
+    public List<String> replayLogs(Duration window, int limit) {
         Instant to   = Instant.now();
         Instant from = window != null ? to.minus(window) : Instant.EPOCH;
-        return replayLogs(from, to);
+        return replayLogs(from, to, limit);
     }
 
     public List<String> replayLogs(Instant from, Instant to) {
-        List<TimestampedLine> lines = new ArrayList<>();
+        return replayLogs(from, to, Integer.MAX_VALUE);
+    }
 
-        for (LogEntry entry : logEntryDao.findByTimeRange(from, to)) {
-            String line;
-            try {
-                line = reconstructor.reconstruct(entry);
-            } catch (RuntimeException e) {
-                line = "[!] reconstruction failed for entry " + entry.getId()
-                        + " (template " + entry.getTemplateId() + "): " + e.getMessage();
-            }
+    public List<String> replayLogs(Instant from, Instant to, int limit) {
+        List<LogEntry> entries = logEntryDao.findByTimeRange(from, to, limit);
+        List<RawLog>   raws    = rawLogDao.findByTimeRange(from, to, limit);
+
+        // Bulk-load every template referenced by these entries in one query.
+        // Eliminates the N+1 lookup that would otherwise issue one SELECT per entry.
+        java.util.Set<Long> templateIds = new java.util.HashSet<>(entries.size());
+        for (LogEntry e : entries) templateIds.add(e.getTemplateId());
+        Map<Long, Template> templatesById = templateDao.findByIds(templateIds);
+
+        // Build (timestamp, line) pairs for entries, skipping any whose template is
+        // missing (referential gap — don't fail the whole replay).
+        List<TimestampedLine> entryLines = new ArrayList<>(entries.size());
+        for (LogEntry entry : entries) {
+            Template t = templatesById.get(entry.getTemplateId());
+            if (t == null) continue;
+            String header = reconstructor.reconstruct(t.getPattern(), entry.getParameterValues());
+            String cont = entry.getContinuationText();
+            String line = cont != null && !cont.isEmpty() ? header + "\n" + cont : header;
             Instant ts = entry.getLogTimestamp() != null ? entry.getLogTimestamp() : Instant.EPOCH;
-            lines.add(new TimestampedLine(ts, line));
+            entryLines.add(new TimestampedLine(ts, line));
         }
 
-        for (RawLog raw : rawLogDao.findByTimeRange(from, to)) {
+        List<TimestampedLine> rawLines = new ArrayList<>(raws.size());
+        for (RawLog raw : raws) {
             Instant ts = raw.getLogTimestamp() != null ? raw.getLogTimestamp() : Instant.EPOCH;
             String content = raw.getContent() != null ? raw.getContent() : "";
-            lines.add(new TimestampedLine(ts, content));
+            rawLines.add(new TimestampedLine(ts, content));
         }
 
-        lines.sort(java.util.Comparator.comparing(TimestampedLine::timestamp));
-        return lines.stream().map(TimestampedLine::line).collect(Collectors.toList());
+        // Both sides are already ORDER BY log_timestamp ASC from SQL — two-pointer merge.
+        List<String> merged = new ArrayList<>(entryLines.size() + rawLines.size());
+        int i = 0, j = 0;
+        while (i < entryLines.size() && j < rawLines.size()) {
+            if (entryLines.get(i).timestamp().compareTo(rawLines.get(j).timestamp()) <= 0) {
+                merged.add(entryLines.get(i++).line());
+            } else {
+                merged.add(rawLines.get(j++).line());
+            }
+        }
+        while (i < entryLines.size()) merged.add(entryLines.get(i++).line());
+        while (j < rawLines.size()) merged.add(rawLines.get(j++).line());
+
+        if (merged.size() > limit) {
+            // Both sides may have hit the limit; the merged stream could be up to 2*limit.
+            List<String> truncated = new ArrayList<>(limit + 1);
+            truncated.addAll(merged.subList(0, limit));
+            truncated.add("[truncated — showing first " + limit
+                    + " lines; widen filter or narrow time window for more]");
+            return truncated;
+        }
+        return merged;
     }
+
 
     public List<Template> findSuggestions(String queryPattern, int maxResults) {
         String[] words = queryPattern.split("[\\s{}]+");

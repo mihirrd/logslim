@@ -1,11 +1,14 @@
 package com.logslim.storage;
 
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,10 +53,26 @@ public class TemplateDao {
         return results.stream().findFirst();
     }
 
+    @Cacheable(value = "templates", key = "#id")
     public Optional<Template> findById(long id) {
         String sql = "SELECT * FROM templates WHERE template_id = :id";
         List<Template> results = jdbc.query(sql, Map.of("id", id), ROW_MAPPER);
         return results.stream().findFirst();
+    }
+
+    /**
+     * Bulk-fetch templates by id. Returns a map keyed by template_id; missing ids
+     * are simply absent from the map. Returns an empty map when ids is null/empty.
+     * Used by replay to avoid the N+1 lookup of `findById` per log entry.
+     */
+    public Map<Long, Template> findByIds(Collection<Long> ids) {
+        if (ids == null || ids.isEmpty()) return Map.of();
+        String sql = "SELECT * FROM templates WHERE template_id IN (:ids)";
+        List<Template> results = jdbc.query(sql,
+                new MapSqlParameterSource("ids", ids), ROW_MAPPER);
+        Map<Long, Template> byId = new HashMap<>(results.size());
+        for (Template t : results) byId.put(t.getId(), t);
+        return byId;
     }
 
     public void incrementOccurrences(long templateId) {
