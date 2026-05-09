@@ -1,6 +1,5 @@
 package com.logslim.api;
 
-import com.logslim.extraction.TemplateExtractor;
 import com.logslim.query.LogQueryService;
 import org.springframework.web.bind.annotation.*;
 
@@ -10,7 +9,6 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -22,11 +20,9 @@ public class LogController {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final LogQueryService queryService;
-    private final TemplateExtractor extractor;
 
-    public LogController(LogQueryService queryService, TemplateExtractor extractor) {
+    public LogController(LogQueryService queryService) {
         this.queryService = queryService;
-        this.extractor    = extractor;
     }
 
     @PostMapping("/query")
@@ -49,21 +45,6 @@ public class LogController {
         }
         Duration window = last != null ? parseDuration(last) : null;
         return queryService.replayLogs(window);
-    }
-
-    @PostMapping("/ingest")
-    public Map<String, Object> ingest(@RequestBody IngestRequest req) {
-        String source = req.source() != null ? req.source() : "api";
-        String content = req.content() != null ? req.content() : "";
-        String[] lines = content.split("\n");
-        int processed = 0;
-        for (String line : lines) {
-            if (!line.isBlank()) {
-                extractor.process(line.stripTrailing(), source);
-                processed++;
-            }
-        }
-        return Map.of("linesProcessed", processed);
     }
 
     @GetMapping("/suggestions")
@@ -92,5 +73,4 @@ public class LogController {
     }
 
     record QueryRequest(String pattern, Map<String, String> filters, String last) {}
-    record IngestRequest(String content, String source) {}
 }

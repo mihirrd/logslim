@@ -40,6 +40,23 @@ public class AdminService {
         jdbc.execute("CHECKPOINT");
     }
 
+    public record ClearResult(int entriesDeleted, int templatesDeleted, int rawLogsDeleted) {}
+
+    public ClearResult clearDatabase() {
+        int entries   = count("log_entries");
+        int templates = count("templates");
+        int raw       = count("raw_logs");
+
+        for (String name : List.of("log_entries", "raw_logs", "templates")) {
+            dropObject(name);
+        }
+
+        recreateTables();
+        jdbc.execute("CHECKPOINT");
+
+        return new ClearResult(entries, templates, raw);
+    }
+
     public long calculateParquetSize(Path dataDir) {
         String templatesParquet = dataDir.resolve("templates.parquet").toAbsolutePath().toString();
         String logEntriesParquet = dataDir.resolve("log_entries.parquet").toAbsolutePath().toString();
@@ -50,13 +67,47 @@ public class AdminService {
                 + new File(rawLogsParquet).length();
     }
 
+    private int count(String table) {
+        Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    private void recreateTables() {
+        jdbc.execute("""
+            CREATE TABLE templates (
+                template_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pattern     TEXT    NOT NULL UNIQUE,
+                occurrences INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT    NOT NULL,
+                updated_at  TEXT    NOT NULL
+            )""");
+        jdbc.execute("""
+            CREATE TABLE log_entries (
+                entry_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id       INTEGER NOT NULL REFERENCES templates(template_id),
+                log_timestamp     INTEGER NOT NULL,
+                parameter_values  TEXT    NOT NULL DEFAULT '[]',
+                continuation_text TEXT
+            )""");
+        jdbc.execute("CREATE INDEX idx_le_template  ON log_entries(template_id)");
+        jdbc.execute("CREATE INDEX idx_le_timestamp ON log_entries(log_timestamp)");
+        jdbc.execute("""
+            CREATE TABLE raw_logs (
+                log_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                content       TEXT NOT NULL,
+                log_timestamp TEXT NOT NULL,
+                source        TEXT,
+                created_at    TEXT NOT NULL
+            )""");
+        jdbc.execute("CREATE INDEX idx_raw_timestamp ON raw_logs(log_timestamp)");
+    }
+
     private void dropObject(String name) {
-        String type = jdbc.queryForObject(
+        List<String> types = jdbc.queryForList(
                 "SELECT table_type FROM information_schema.tables WHERE table_name = ?",
                 String.class, name);
-        if (type == null || type.isEmpty())
-            return;
-        if ("VIEW".equals(type)) {
+        if (types.isEmpty()) return;
+        if ("VIEW".equals(types.get(0))) {
             jdbc.execute("DROP VIEW " + name);
         } else {
             jdbc.execute("DROP TABLE " + name);

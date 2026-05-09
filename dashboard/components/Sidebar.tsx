@@ -7,8 +7,6 @@ const nav = [
   { href: "/",          label: "Dashboard",  icon: "▦" },
   { href: "/templates", label: "Templates",  icon: "≡" },
   { href: "/replay",    label: "Replay",     icon: "⏴" },
-  { href: "/ingest",    label: "Ingest",     icon: "⬆" },
-  { href: "/settings",  label: "Settings",   icon: "⚙" },
 ];
 
 export function Sidebar() {

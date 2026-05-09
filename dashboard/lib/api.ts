@@ -87,14 +87,8 @@ export const api = {
   }): Promise<string[]> =>
     fetch(`${BASE}/replay?${qs(params)}`).then((r) => r.json()),
 
-  ingest: (body: { content: string; source: string }): Promise<{ linesProcessed: number }> =>
-    post(`${BASE}/ingest`, body),
-
   suggestions: (pattern: string): Promise<Suggestion[]> =>
     fetch(`${BASE}/suggestions?pattern=${encodeURIComponent(pattern)}`).then((r) => r.json()),
-
-  compact: (): Promise<{ message: string }> => post(`${BASE}/compact`, {}),
-
 };
 
 export function relativeTime(epochMs: number): string {
