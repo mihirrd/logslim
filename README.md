@@ -1,6 +1,6 @@
 # LogSlim
 
-**Lossless log compression that fits 9 MB of logs into 1.7 MB — without losing a single line.**
+**Lossless log compression that saves storage upto 80% — without losing a single line.**
 
 LogSlim is a CLI tool and web dashboard that extracts repeating log templates, separates the variable parameters, and stores everything in compressed Parquet files. Every original log line is exactly reconstructable on demand. It sits in front of your existing storage — no agent, no SDK changes, no vendor lock-in.
 
@@ -67,7 +67,7 @@ Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
 
 ```bash
 # Build from source
-git clone https://github.com/your-org/logslim
+git clone https://github.com/<username>/logslim
 cd logslim
 mvn clean package -q
 alias logslim="java -jar $(pwd)/target/logslim-2.0.0.jar"
