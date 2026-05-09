@@ -95,8 +95,6 @@ export const api = {
 
   compact: (): Promise<{ message: string }> => post(`${BASE}/compact`, {}),
 
-  clear: (): Promise<{ entriesDeleted: number; templatesDeleted: number; rawLogsDeleted: number }> =>
-    post(`${BASE}/clear`, {}),
 };
 
 export function relativeTime(epochMs: number): string {
