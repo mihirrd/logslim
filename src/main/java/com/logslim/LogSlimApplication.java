@@ -14,38 +14,25 @@ public class LogSlimApplication {
     public static void main(String[] args) {
         if (args.length > 0 && "serve".equals(args[0])) {
             String dbPath = System.getProperty("logslim.db.path", "logs.duckdb");
-            if (!Files.exists(Paths.get(dbPath))) {
-                System.err.println("ERROR: Database not found: " + dbPath);
-                System.err.println("       Ingest some logs first: logslim run --input <file>");
+            // Server reads from the Parquet snapshot in `<dbname>_data/`, never
+            // from logs.duckdb itself — see ParquetDataSourceConfig. The check
+            // here surfaces a clear error before Spring tries to wire the bean.
+            String dataDirBase = dbPath.endsWith(".duckdb")
+                    ? dbPath.substring(0, dbPath.length() - ".duckdb".length())
+                    : dbPath;
+            if (!Files.exists(Paths.get(dataDirBase + "_data", "templates.parquet"))) {
+                System.err.println("ERROR: No Parquet snapshot found at " + dataDirBase + "_data/.");
+                System.err.println("       Run `logslim compact -y` first; the dashboard reads only the");
+                System.err.println("       compacted snapshot, not the live database.");
                 System.exit(1);
             }
             System.setProperty("spring.main.web-application-type", "servlet");
             System.setProperty("spring.sql.init.mode", "never");
-            System.setProperty("spring.datasource.type",
-                    "org.springframework.jdbc.datasource.DriverManagerDataSource");
-            try {
-                SpringApplication.run(LogSlimApplication.class, args);
-            } catch (Exception e) {
-                if (hasLockError(e)) {
-                    System.err.println();
-                    System.err.println("ERROR: Another process already has the database locked.");
-                    System.err.println("       Stop any running logslim processes and try again.");
-                    System.err.println("       Run: pkill -f logslim");
-                    System.exit(1);
-                }
-                throw e;
-            }
+            SpringApplication.run(LogSlimApplication.class, args);
         } else {
             System.exit(SpringApplication.exit(
                 SpringApplication.run(LogSlimApplication.class, args)));
         }
     }
 
-    private static boolean hasLockError(Throwable t) {
-        while (t != null) {
-            if (t.getMessage() != null && t.getMessage().contains("Could not set lock")) return true;
-            t = t.getCause();
-        }
-        return false;
-    }
 }

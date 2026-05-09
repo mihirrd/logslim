@@ -58,25 +58,45 @@ public class AdminService {
         Path logEntriesParquet = dataDir.resolve("log_entries.parquet");
         Path rawLogsParquet    = dataDir.resolve("raw_logs.parquet");
 
-        // 1. Snapshot current state to Parquet (works whether reading from a base
-        //    table or from the unified view — DuckDB handles both transparently).
-        copyToParquet("templates",   templatesParquet);
-        copyToParquet("log_entries", logEntriesParquet);
-        copyToParquet("raw_logs",    rawLogsParquet);
+        // Write to .parquet.new first so the COPY never overwrites a file that
+        // an _archive view is currently mapping. After all reads are done and
+        // catalog is torn down, atomically rename the temp files into place.
+        Path templatesTmp  = dataDir.resolve("templates.parquet.new");
+        Path logEntriesTmp = dataDir.resolve("log_entries.parquet.new");
+        Path rawLogsTmp    = dataDir.resolve("raw_logs.parquet.new");
+
+        // 1. Snapshot current state to TEMP Parquet files. Reads through the
+        //    unified view (archive + live) and writes to a separate filename.
+        copyToParquet("templates",   templatesTmp);
+        copyToParquet("log_entries", logEntriesTmp);
+        copyToParquet("raw_logs",    rawLogsTmp);
 
         // 2. Capture MAX(id) BEFORE we drop, so live sequences start past the archive.
         long templatesMaxId  = maxId("templates",   "template_id");
         long logEntriesMaxId = maxId("log_entries", "entry_id");
         long rawLogsMaxId    = maxId("raw_logs",    "log_id");
 
-        // 3. Tear down whatever's currently there. Order matters in the
-        //    un-compacted case because `log_entries.template_id` references
-        //    `templates(template_id)`.
-        dropHybridLayoutIfPresent();
+        // 3. Tear down whatever's currently there. Order matters:
+        //    - Unified views first (they depend on _archive and _live).
+        //    - In the un-compacted case the same loop drops base tables in
+        //      FK-safe order (log_entries → raw_logs → templates).
+        //    - Then the _archive and _live objects (no-op pre-compact).
+        //    - Then sequences.
         for (String name : CORE_TABLES_DROP_ORDER) dropObject(name);
+        dropHybridLayoutIfPresent();
         dropSequencesIfExist();
 
-        // 4. Rebuild the three-object layout fresh.
+        // 4. With the catalog cleared, swap the new Parquet files into place.
+        try {
+            Files.move(templatesTmp,  templatesParquet,  java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(logEntriesTmp, logEntriesParquet, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(rawLogsTmp,    rawLogsParquet,    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException(
+                    "Compact failed while swapping Parquet files: " + e.getMessage(), e);
+        }
+
+        // 5. Rebuild the three-object layout fresh.
         buildHybridLayout(templatesParquet, logEntriesParquet, rawLogsParquet,
                 templatesMaxId, logEntriesMaxId, rawLogsMaxId);
 
@@ -188,10 +208,12 @@ public class AdminService {
         int templates = count("templates");
         int raw       = count("raw_logs");
 
-        // Drop all views and live tables in FK-safe dependency order.
+        // Drop unified views (or base tables, pre-compact) first, then
+        // _archive views and _live tables, then sequences.
         for (String name : CORE_TABLES_DROP_ORDER) dropObject(name);
         dropHybridLayoutIfPresent();
         dropSequencesIfExist();
+        // (clearDatabase already had this order; kept here for parity.)
 
         // Wipe Parquet files on disk (best-effort).
         Path dataDir = resolveDataDir();
