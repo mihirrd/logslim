@@ -13,6 +13,7 @@ import java.util.Map;
 public class RawLogDao {
 
     private final NamedParameterJdbcTemplate jdbc;
+    private final WriteTarget writeTarget;
 
     private static final RowMapper<RawLog> ROW_MAPPER = (rs, rowNum) -> new RawLog(
             rs.getLong("log_id"),
@@ -22,16 +23,16 @@ public class RawLogDao {
             InstantUtil.parse(rs.getString("created_at"))
     );
 
-    public RawLogDao(NamedParameterJdbcTemplate jdbc) {
+    public RawLogDao(NamedParameterJdbcTemplate jdbc, WriteTarget writeTarget) {
         this.jdbc = jdbc;
+        this.writeTarget = writeTarget;
     }
 
     public RawLog insert(RawLog rawLog) {
-        String sql = """
-                INSERT INTO raw_logs (content, log_timestamp, source, created_at)
-                VALUES (:content, :logTs, :source, :createdAt)
-                RETURNING log_id
-                """;
+        String sql = "INSERT INTO " + writeTarget.tableFor("raw_logs") +
+                " (content, log_timestamp, source, created_at) " +
+                "VALUES (:content, :logTs, :source, :createdAt) " +
+                "RETURNING log_id";
         Instant now = Instant.now();
         var params = new MapSqlParameterSource()
                 .addValue("content",   rawLog.getContent())

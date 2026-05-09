@@ -23,6 +23,7 @@ public class LogEntryDao {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final NamedParameterJdbcTemplate jdbc;
+    private final WriteTarget writeTarget;
 
     @Value("${logslim.storage.batch-insert-size:500}")
     private int batchSize;
@@ -35,16 +36,16 @@ public class LogEntryDao {
             rs.getString("continuation_text")
     );
 
-    public LogEntryDao(NamedParameterJdbcTemplate jdbc) {
+    public LogEntryDao(NamedParameterJdbcTemplate jdbc, WriteTarget writeTarget) {
         this.jdbc = jdbc;
+        this.writeTarget = writeTarget;
     }
 
     public LogEntry insert(LogEntry entry) {
-        String sql = """
-                INSERT INTO log_entries (template_id, log_timestamp, parameter_values, continuation_text)
-                VALUES (:templateId, :logTs, :params, :continuation)
-                RETURNING entry_id
-                """;
+        String sql = "INSERT INTO " + writeTarget.tableFor("log_entries") +
+                " (template_id, log_timestamp, parameter_values, continuation_text) " +
+                "VALUES (:templateId, :logTs, :params, :continuation) " +
+                "RETURNING entry_id";
         Long id = jdbc.queryForObject(sql, entryToParams(entry), Long.class);
         entry.setId(id);
         return entry;
@@ -52,10 +53,9 @@ public class LogEntryDao {
 
     @Transactional
     public void insertBatch(List<LogEntry> entries) {
-        String sql = """
-                INSERT INTO log_entries (template_id, log_timestamp, parameter_values, continuation_text)
-                VALUES (:templateId, :logTs, :params, :continuation)
-                """;
+        String sql = "INSERT INTO " + writeTarget.tableFor("log_entries") +
+                " (template_id, log_timestamp, parameter_values, continuation_text) " +
+                "VALUES (:templateId, :logTs, :params, :continuation)";
         for (int i = 0; i < entries.size(); i += batchSize) {
             List<LogEntry> chunk = entries.subList(i, Math.min(i + batchSize, entries.size()));
             MapSqlParameterSource[] batchParams = chunk.stream()

@@ -89,7 +89,7 @@ class LogReconstructorTest {
     @Test
     void multiLineEntry_reconstructsFullBlock() {
         Template tmpl = new Template(1L, "ERROR {num} - DB failed", 1L, Instant.now(), Instant.now());
-        TemplateDao dao = new TemplateDao(null) {
+        TemplateDao dao = new TemplateDao(null, null) {
             @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
         };
 
@@ -104,7 +104,7 @@ class LogReconstructorTest {
     @Test
     void singleLineEntry_noTrailingNewline() {
         Template tmpl = new Template(2L, "INFO server started", 1L, Instant.now(), Instant.now());
-        TemplateDao dao = new TemplateDao(null) {
+        TemplateDao dao = new TemplateDao(null, null) {
             @Override public Optional<Template> findById(long id) { return Optional.of(tmpl); }
         };
 

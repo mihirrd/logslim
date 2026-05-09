@@ -17,6 +17,7 @@ import java.util.Optional;
 public class TemplateDao {
 
     private final NamedParameterJdbcTemplate jdbc;
+    private final WriteTarget writeTarget;
 
     private static final RowMapper<Template> ROW_MAPPER = (rs, rowNum) -> new Template(
             rs.getLong("template_id"),
@@ -26,16 +27,16 @@ public class TemplateDao {
             InstantUtil.parse(rs.getString("updated_at"))
     );
 
-    public TemplateDao(NamedParameterJdbcTemplate jdbc) {
+    public TemplateDao(NamedParameterJdbcTemplate jdbc, WriteTarget writeTarget) {
         this.jdbc = jdbc;
+        this.writeTarget = writeTarget;
     }
 
     public Template insert(Template template) {
-        String sql = """
-                INSERT INTO templates (pattern, occurrences, created_at, updated_at)
-                VALUES (:pattern, :occurrences, :createdAt, :updatedAt)
-                RETURNING template_id
-                """;
+        String sql = "INSERT INTO " + writeTarget.tableFor("templates") +
+                " (pattern, occurrences, created_at, updated_at) " +
+                "VALUES (:pattern, :occurrences, :createdAt, :updatedAt) " +
+                "RETURNING template_id";
         var params = new MapSqlParameterSource()
                 .addValue("pattern", template.getPattern())
                 .addValue("occurrences", template.getOccurrences())
@@ -76,11 +77,11 @@ public class TemplateDao {
     }
 
     public void incrementOccurrences(long templateId) {
-        String sql = """
-                UPDATE templates
-                SET occurrences = occurrences + 1, updated_at = :now
-                WHERE template_id = :id
-                """;
+        // After compact, archive templates' counts are frozen — UPDATE on
+        // templates_live affects 0 rows when the id belongs to the archive.
+        String sql = "UPDATE " + writeTarget.tableFor("templates") +
+                " SET occurrences = occurrences + 1, updated_at = :now " +
+                "WHERE template_id = :id";
         jdbc.update(sql, Map.of("id", templateId, "now", InstantUtil.format(Instant.now())));
     }
 
