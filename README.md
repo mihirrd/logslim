@@ -104,7 +104,7 @@ The dashboard exposes all CLI operations through a browser UI:
 - **Ingest** — paste log content directly into the browser
 - **Settings** — compact database to Parquet or clear all data, both with confirmation dialogs
 
-Only one process can hold the DuckDB write lock at a time. If you run `logslim serve`, stop it before running any other `logslim` command (or pass `-Dlogslim.db.path=` to point each process at a different file).
+The server reads only the compacted Parquet snapshot in `logs_data/`, so `logslim serve` can run concurrently with `logslim run` / `logslim consume` (the writer owns `logs.duckdb`). On first startup the server auto-bootstraps an empty Parquet snapshot if one doesn't exist yet — no manual `logslim compact` step needed. The dashboard sees new data after each subsequent compact.
 
 ---
 
