@@ -17,7 +17,8 @@ public class PicocliConfig {
             QueryCommand query,
             ReplayCommand replay,
             CompactCommand compact,
-            ServeCommand serve) {
+            ServeCommand serve,
+            ConsumeCommand consume) {
         CommandLine cmd = new CommandLine(new LogSlimCommand(), factory);
         cmd.addSubcommand("run", run);
         cmd.addSubcommand("templates", templates);
@@ -26,6 +27,7 @@ public class PicocliConfig {
         cmd.addSubcommand("replay", replay);
         cmd.addSubcommand("compact", compact);
         cmd.addSubcommand("serve", serve);
+        cmd.addSubcommand("consume", consume);
         return cmd;
     }
 

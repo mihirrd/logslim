@@ -119,6 +119,26 @@ logslim run --input /var/log/app.log
 cat /var/log/app.log | logslim run --input -
 ```
 
+### Continuous ingestion from Kafka
+
+For real-time log shipping, `logslim consume` runs as a daemon: it subscribes to a Kafka topic, buffers records, flushes via the same batched extraction pipeline, and periodically compacts so the on-disk live tail stays small.
+
+```bash
+logslim consume \
+  --topic app-logs \
+  --bootstrap-servers kafka-broker:9092 \
+  --group-id logslim-prod \
+  --batch-size 5000 \
+  --flush-interval PT5S \
+  --compact-interval PT10M
+```
+
+The consumer runs single-threaded — poll, write, and compact share the same thread, matching DuckDB's one-writer-per-process constraint. Offsets are committed only after a batch is successfully written (**at-least-once**); if the JVM crashes mid-batch, the next run re-consumes from the last committed offset.
+
+`--from-beginning` resets the consumer to the earliest available offset on subscribe (otherwise the default is `latest`). The default `--source kafka` populates the `source` column for any record that lands in `raw_logs` (i.e., pre-lock during Drain's learning phase).
+
+`SIGINT` triggers a graceful shutdown: in-flight batch flushed, offsets committed, final compact run, then exit.
+
 ### Compress to Parquet
 
 ```bash

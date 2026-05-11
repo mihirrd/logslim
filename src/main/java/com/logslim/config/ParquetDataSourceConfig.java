@@ -4,7 +4,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+import org.springframework.jdbc.datasource.AbstractDataSource;
 
 import javax.sql.DataSource;
 import java.nio.file.Files;
@@ -19,22 +19,28 @@ import java.util.List;
 /**
  * Server DataSource that reads only the compacted Parquet snapshot —
  * never opens `logs.duckdb`. This sidesteps DuckDB's single-process file
- * lock entirely: the CLI can ingest into `logs.duckdb` while the dashboard
- * keeps serving reads from `logs_data/*.parquet`.
+ * lock entirely: the CLI can ingest into `logs.duckdb` (or run
+ * `logslim consume`) while the dashboard keeps serving reads from
+ * `logs_data/*.parquet`.
  *
  * Trade-off: the dashboard sees only data that has been compacted. The
  * live tail (entries added since the last compact) is invisible. Run
- * `logslim compact -y` periodically (manually or via cron) to refresh.
+ * `logslim compact -y` periodically (or use `logslim consume` which
+ * compacts on its own schedule).
  *
- * Implementation: in-memory DuckDB (`jdbc:duckdb:`) with three views over
- * the Parquet files. DAO read methods continue to query the unsuffixed
- * names (`templates`, `log_entries`, `raw_logs`) without modification.
+ * Implementation: each {@code getConnection()} opens a fresh in-memory
+ * DuckDB and creates three views over the Parquet files, then returns
+ * that connection. On {@code close()} the connection is destroyed.
  *
- * The connection is kept alive via SingleConnectionDataSource because
- * each new in-memory DuckDB connection is a fresh, empty database — the
- * views must persist across requests, so we hold a single shared
- * connection. JdbcTemplate is thread-safe over it; concurrent dashboard
- * requests serialize at the JDBC level (acceptable at dashboard scale).
+ * <p><b>Why per-request, not a shared connection?</b> The Parquet files
+ * are rewritten atomically by {@link com.logslim.service.AdminService#compactDatabase}
+ * via a {@code .parquet.new} → {@code .parquet} rename. A query that
+ * lands during that swap can fail transiently. With a shared connection,
+ * one transient failure poisons DuckDB's pending-result state and every
+ * subsequent request fails with
+ * {@code Attempting to execute an unsuccessful or closed pending query result}
+ * until the JVM is restarted. A fresh connection per request isolates
+ * failures to that one call.
  */
 @Configuration
 @ConditionalOnWebApplication
@@ -47,8 +53,8 @@ public class ParquetDataSourceConfig {
     private String dbPath;
 
     @Bean
-    public DataSource dataSource() throws SQLException {
-        Path dataDir = resolveDataDir(dbPath);
+    public DataSource dataSource() {
+        final Path dataDir = resolveDataDir(dbPath);
         for (String name : CORE_TABLES) {
             Path parquet = dataDir.resolve(name + ".parquet");
             if (!Files.exists(parquet)) {
@@ -58,18 +64,35 @@ public class ParquetDataSourceConfig {
             }
         }
 
-        Connection conn = DriverManager.getConnection("jdbc:duckdb:");
-        try (Statement s = conn.createStatement()) {
-            for (String name : CORE_TABLES) {
-                Path parquet = dataDir.resolve(name + ".parquet");
-                s.execute("CREATE VIEW " + name +
-                          " AS SELECT * FROM read_parquet('" + parquet.toAbsolutePath() + "')");
-            }
+        // Ensure the DuckDB driver is loaded before the first request hits us.
+        try {
+            Class.forName("org.duckdb.DuckDBDriver");
+        } catch (ClassNotFoundException e) {
+            throw new IllegalStateException("DuckDB JDBC driver not on classpath", e);
         }
 
-        // suppressClose=true so JdbcTemplate.close() doesn't end the connection
-        // (and with it, the in-memory database).
-        return new SingleConnectionDataSource(conn, true);
+        return new AbstractDataSource() {
+            @Override
+            public Connection getConnection() throws SQLException {
+                Connection c = DriverManager.getConnection("jdbc:duckdb:");
+                try (Statement s = c.createStatement()) {
+                    for (String name : CORE_TABLES) {
+                        Path parquet = dataDir.resolve(name + ".parquet");
+                        s.execute("CREATE VIEW " + name +
+                                " AS SELECT * FROM read_parquet('" + parquet.toAbsolutePath() + "')");
+                    }
+                } catch (SQLException e) {
+                    try { c.close(); } catch (SQLException ignored) {}
+                    throw e;
+                }
+                return c;
+            }
+
+            @Override
+            public Connection getConnection(String username, String password) throws SQLException {
+                return getConnection();
+            }
+        };
     }
 
     private static Path resolveDataDir(String dbPath) {
