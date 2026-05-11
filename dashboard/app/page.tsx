@@ -208,7 +208,7 @@ export default function Dashboard() {
               {templates.length === 0 && (
                 <tr>
                   <td colSpan={4} className="px-4 py-8 text-center text-[#4b5563] text-sm">
-                    No templates yet. <Link href="/ingest" className="text-green-400 hover:text-green-300">Ingest some logs</Link> to get started.
+                    No templates yet. Ingest some logs to get started.
                   </td>
                 </tr>
               )}
