@@ -2,7 +2,11 @@
 
 **Lossless log compression that saves storage upto 80% — without losing a single line.**
 
-LogSlim is a CLI tool and web dashboard that extracts repeating log templates, separates the variable parameters, and stores everything in compressed Parquet files. Every original log line is exactly reconstructable on demand. It sits in front of your existing storage — no agent, no SDK changes, no vendor lock-in.
+LogSlim is a CLI tool and web dashboard that extracts repeating log templates, separates the variable parameters, and stores everything in *compressed Parquet files*. 
+
+Every original log line is exactly reconstructable on demand. 
+
+Sits in front of your existing storage. No agent, No SDK changes, No vendor lock-in.
 
 ---
 
@@ -20,25 +24,15 @@ Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.m
 | After `compact` (`.duckdb` + Parquet) | **1.71 MB** |
 | Reduction vs source | **76.5%** |
 
-Compression improves with log repetition. Files with fewer distinct templates compress further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. On real production logs we've seen:
+Compression improves with log repetition. Files with fewer distinct templates compress 
+further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. 
+
+We've seen:
 
 | Log file | Original | After compact | Reduction |
 |----------|----------|---------------|-----------|
 | `app_logs.log` (100k lines) | 7.35 MB | 1.49 MB | 80% |
 | `app.log` (100k lines) | 9.10 MB | 1.71 MB | 81% |
-
-### Compact wall time (100,000 rows)
-
-| Operation | Time |
-|---|---|
-| First compact (table → Parquet + hybrid layout) | ~7.2 s |
-| Re-compact (merge 10k-row live tail back into archive) | ~7.5 s |
-
-Compact reads through the unified view and rewrites a single Parquet per table, so cost scales with total row count, not just the size of the new tail.
-
-### Ingestion throughput
-
-For 100k synthetic lines, end-to-end wall time including JVM/Spring startup is ~70 s (≈ 1.5k lines/s). Roughly 10 s of that is fixed startup overhead, so steady-state per-line cost dominates only on larger inputs — `benchmarks/run_all.sh 1000000` is recommended for a meaningful ingestion number.
 
 ---
 
@@ -70,13 +64,13 @@ Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
 git clone https://github.com/<username>/logslim
 cd logslim
 mvn clean package -q
-alias logslim="java -jar $(pwd)/target/logslim-2.0.0.jar"
+alias logslim="java -jar $(pwd)/target/logslim-1.0.0.jar"
 ```
 
 By default LogSlim reads and writes `logs.duckdb` in the current directory. Override with `-Dlogslim.db.path=`:
 
 ```bash
-java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-2.0.0.jar run --input /var/log/myapp.log
+java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-1.0.0.jar run --input <file>
 ```
 
 ---
@@ -107,16 +101,42 @@ The dashboard exposes all CLI operations through a browser UI:
 The server reads only the compacted Parquet snapshot in `logs_data/`, so `logslim serve` can run concurrently with `logslim run` / `logslim consume` (the writer owns `logs.duckdb`). On first startup the server auto-bootstraps an empty Parquet snapshot if one doesn't exist yet — no manual `logslim compact` step needed. The dashboard sees new data after each subsequent compact.
 
 ---
+## Getting started
+
+Time to ingest logs! Make sure you start the api server and the dashboard. 
+Use the following command to ingest logs into logslim. 
+
+### Ingest logs: 
+
+```bash
+logslim run --input <file>
+```
+
+Logs will not be visible on the dashboard, until compacted. Since the dashboard queries for the 
+compacted views, run the below command to compact the logs
+
+### compact logs:
+
+```bash
+logslim compact
+```
+
+You should now be able to check the logs on the dashboard. 
+
+P.S. You can check the size of *logs_data* + logs.duckdb file and compare it to the size of the original log file. 
+
+- Click on templates to inspect them. It will show you top 10 recent logs matching that template.
+- Use *Replay* tab to reconstruct logs in a specific time window. 
+
+
+---
 
 ## CLI Usage
 
 ### Ingest logs
 
 ```bash
-logslim run --input /var/log/app.log
-
-# From stdin
-cat /var/log/app.log | logslim run --input -
+logslim run --input <file>
 ```
 
 ### Continuous ingestion from Kafka
@@ -202,11 +222,6 @@ logslim replay --last 9999d
 
 Output is byte-exact — identical to the original log lines including multi-line stack traces.
 
-### Clear all data
-
-```bash
-logslim clear --yes
-```
 
 ---
 
