@@ -10,6 +10,8 @@ Sits in front of your existing storage. No agent, No SDK changes, No vendor lock
 
 ---
 
+![Product Preview](preview.gif)
+
 ## Benchmarks
 
 Real-world numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3).
