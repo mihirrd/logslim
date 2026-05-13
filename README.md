@@ -12,30 +12,6 @@ Sits in front of your existing storage. No agent, No SDK changes, No vendor lock
 
 ![Product Preview](preview.gif)
 
-## Benchmarks
-
-Real-world numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3).
-Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.md`.
-
-### Compression (100,000 synthetic log lines, 10 templates, ~7 MB raw)
-
-| Stage | Size |
-|---|---|
-| Source `.log` file | 7.30 MB |
-| After ingest (`.duckdb`) | 16.26 MB |
-| After `compact` (`.duckdb` + Parquet) | **1.71 MB** |
-| Reduction vs source | **76.5%** |
-
-Compression improves with log repetition. Files with fewer distinct templates compress 
-further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. 
-
-We've seen:
-
-| Log file | Original | After compact | Reduction |
-|----------|----------|---------------|-----------|
-| `app_logs.log` (100k lines) | 7.35 MB | 1.49 MB | 80% |
-| `app.log` (100k lines) | 9.10 MB | 1.71 MB | 81% |
-
 ---
 
 ## How It Works
@@ -223,6 +199,31 @@ logslim replay --last 9999d
 ```
 
 Output is byte-exact — identical to the original log lines including multi-line stack traces.
+
+---
+
+## Benchmarks
+
+Real-world numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3).
+Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.md`.
+
+### Compression (100,000 synthetic log lines, 10 templates, ~7 MB raw)
+
+| Stage | Size |
+|---|---|
+| Source `.log` file | 7.30 MB |
+| After ingest (`.duckdb`) | 16.26 MB |
+| After `compact` (`.duckdb` + Parquet) | **1.71 MB** |
+| Reduction vs source | **76.5%** |
+
+Compression improves with log repetition. Files with fewer distinct templates compress 
+further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. 
+
+
+| Log file | Original | After compact | Reduction |
+|----------|----------|---------------|-----------|
+| `app_logs.log` (100k lines) | 7.35 MB | 1.49 MB | 80% |
+| `app.log` (100k lines) | 9.10 MB | 1.71 MB | 81% |
 
 
 ---
