@@ -55,6 +55,11 @@ public class TemplateQueryService {
         return templateDao.findByPatternContaining(text, limit);
     }
 
+    public List<Template> getAnomalies(Duration window) {
+        Instant since = window != null ? Instant.now().minus(window) : Instant.now().minus(Duration.ofHours(1));
+        return templateDao.findAnomalies(since);
+    }
+
     private List<SlotStats> buildSlotStats(Template template, long templateId) {
         List<SlotStats> result = new ArrayList<>();
         int slotIndex = 0;

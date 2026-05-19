@@ -17,7 +17,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
-@RequestMapping("/api/templates")
+@RequestMapping("/api")
 public class TemplateController {
 
     private static final DateTimeFormatter TS_FMT =
@@ -31,7 +31,7 @@ public class TemplateController {
         this.reconstructor = reconstructor;
     }
 
-    @GetMapping
+    @GetMapping("/templates")
     public List<Map<String, Object>> list(
             @RequestParam(required = false) String search,
             @RequestParam(defaultValue = "20") int limit,
@@ -47,7 +47,7 @@ public class TemplateController {
         return templates.stream().map(this::toMap).collect(Collectors.toList());
     }
 
-    @GetMapping("/{id}")
+    @GetMapping("/templates/{id}")
     public ResponseEntity<Map<String, Object>> inspect(
             @PathVariable long id,
             @RequestParam(defaultValue = "10") int recent) {
@@ -56,6 +56,17 @@ public class TemplateController {
                 .map(this::detailToMap)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    @GetMapping("/anomalies")
+    public List<Map<String, Object>> anomalies(
+            @RequestParam(defaultValue = "1h") String last) {
+
+        Duration window = parseDuration(last);
+        return queryService.getAnomalies(window)
+                .stream()
+                .map(this::toMap)
+                .collect(Collectors.toList());
     }
 
     private Map<String, Object> toMap(Template t) {

@@ -117,4 +117,19 @@ public class TemplateDao {
         Long n = jdbc.queryForObject("SELECT COUNT(*) FROM templates", Map.of(), Long.class);
         return n == null ? 0 : n;
     }
+
+    public List<Template> findAnomalies(Instant since) {
+        String sql = "SELECT * FROM templates WHERE " +
+                "created_at >= :since OR " +
+                "UPPER(pattern) LIKE '%ERROR%' OR " +
+                "UPPER(pattern) LIKE '%EXCEPTION%' OR " +
+                "UPPER(pattern) LIKE '%FAILED%' OR " +
+                "UPPER(pattern) LIKE '%WARN%' OR " +
+                "UPPER(pattern) LIKE '%CRITICAL%' " +
+                "ORDER BY created_at DESC, occurrences DESC LIMIT 100";
+
+        return jdbc.query(sql,
+                new MapSqlParameterSource("since", InstantUtil.format(since)),
+                ROW_MAPPER);
+    }
 }

@@ -99,6 +99,10 @@ export const api = {
 
   suggestions: (pattern: string): Promise<Suggestion[]> =>
     get(`${BASE}/suggestions?pattern=${encodeURIComponent(pattern)}`),
+
+  anomalies: (params: {
+    last?: string;
+  }): Promise<TemplateRow[]> => get(`${BASE}/anomalies?${qs(params)}`),
 };
 
 export function relativeTime(epochMs: number): string {
