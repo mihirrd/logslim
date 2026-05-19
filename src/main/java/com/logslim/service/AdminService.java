@@ -99,10 +99,9 @@ public class AdminService {
             // 5. Rebuild the three-object layout fresh.
             buildHybridLayout(templatesParquet, logEntriesParquet, rawLogsParquet,
                     templatesMaxId, logEntriesMaxId, rawLogsMaxId);
-
-            jdbc.execute("CHECKPOINT");
             writeTarget.invalidate();
             jdbc.execute("COMMIT");
+            jdbc.execute("CHECKPOINT");
         } catch (Exception e) {
             jdbc.execute("ROLLBACK");
             for (Path tmp : List.of(templatesTmp, logEntriesTmp, rawLogsTmp)) {
@@ -144,7 +143,6 @@ public class AdminService {
     private void buildHybridLayout(Path templatesParquet, Path logEntriesParquet,
             Path rawLogsParquet,
             long templatesMaxId, long logEntriesMaxId, long rawLogsMaxId) {
-        jdbc.execute("BEGIN TRANSACTION");
         try {
             // Archive views over Parquet (immutable).
             jdbc.execute("CREATE VIEW templates_archive AS SELECT * FROM read_parquet('"
@@ -200,9 +198,7 @@ public class AdminService {
             jdbc.execute("""
                     CREATE VIEW raw_logs AS
                       SELECT * FROM raw_logs_archive UNION ALL SELECT * FROM raw_logs_live""");
-            jdbc.execute("COMMIT");
         } catch (Exception e) {
-            jdbc.execute("ROLLBACK");
             throw new RuntimeException("Failed to build hybrid layout: " + e.getMessage(), e);
         }
     }
