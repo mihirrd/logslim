@@ -56,8 +56,8 @@ export default function TimelinePage() {
   };
 
   return (
-    <main className="ml-52 p-8">
-      <div className="max-w-7xl">
+    <main className="p-8">
+      <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Timeline</h1>
