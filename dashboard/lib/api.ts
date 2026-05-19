@@ -72,6 +72,29 @@ export interface Suggestion {
   hits: number;
 }
 
+export interface FrequencyDelta {
+  id: number;
+  pattern: string;
+  observedCount: number;
+  baselineCount: number;
+  changePercent: number;
+  isNew: boolean;
+  disappeared: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface FrequencyBucketData {
+  bucketNum: number;
+  timestamp: number;
+  frequency: number;
+  changeFromPrevious: number | null;
+}
+
+export interface FrequencyTrend {
+  [templateId: number]: FrequencyBucketData[];
+}
+
 export const api = {
   stats: (): Promise<Stats> => get(`${BASE}/stats`),
 
@@ -103,6 +126,17 @@ export const api = {
   anomalies: (params: {
     last?: string;
   }): Promise<TemplateRow[]> => get(`${BASE}/anomalies?${qs(params)}`),
+
+  timelineCompare: (params: {
+    observed: string;
+    baseline: string;
+    limit?: number;
+  }): Promise<FrequencyDelta[]> => get(`${BASE}/timeline/compare?${qs(params)}`),
+
+  timelineTrend: (params: {
+    window: string;
+    buckets?: number;
+  }): Promise<FrequencyTrend> => get(`${BASE}/timeline/trend?${qs(params)}`),
 };
 
 export function relativeTime(epochMs: number): string {
