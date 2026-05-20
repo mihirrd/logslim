@@ -4,11 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const nav = [
-  { href: "/", label: "Dashboard", icon: "▦" },
-  { href: "/templates", label: "Templates", icon: "≡" },
-  { href: "/anomalies", label: "Anomalies", icon: "⚠" },
-  { href: "/timeline", label: "Timeline", icon: "⊢" },
-  { href: "/replay", label: "Replay", icon: "⏴" },
+  { href: "/",          label: "Dashboard",  icon: "▦" },
+  { href: "/templates", label: "Templates",  icon: "≡" },
+  { href: "/anomalies", label: "Anomalies",  icon: "⚠" },
+  { href: "/replay",    label: "Replay",     icon: "⏴" },
 ];
 
 export function Sidebar() {
@@ -24,7 +23,7 @@ export function Sidebar() {
           </div>
           <span className="text-white font-semibold text-base tracking-tight">LogSlim</span>
         </div>
-        <p className="text-[#4b5563] text-xs mt-1">Log compression and analysis engine</p>
+        <p className="text-[#4b5563] text-xs mt-1">Log compression engine</p>
       </div>
 
       {/* Nav */}
@@ -35,10 +34,11 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
-              className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${active
-                ? "bg-green-500/10 text-green-400 font-medium"
-                : "text-[#6b7280] hover:text-[#e5e7eb] hover:bg-[#1a1a1a]"
-                }`}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+                active
+                  ? "bg-green-500/10 text-green-400 font-medium"
+                  : "text-[#6b7280] hover:text-[#e5e7eb] hover:bg-[#1a1a1a]"
+              }`}
             >
               <span className="text-base w-4 text-center">{icon}</span>
               {label}

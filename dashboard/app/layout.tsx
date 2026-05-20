@@ -4,7 +4,7 @@ import { Sidebar } from "@/components/Sidebar";
 
 export const metadata: Metadata = {
   title: "LogSlim",
-  description: "Lossless log compression and analysis engine",
+  description: "Lossless log compression engine",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

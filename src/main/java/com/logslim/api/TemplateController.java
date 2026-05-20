@@ -1,7 +1,5 @@
 package com.logslim.api;
 
-import com.logslim.query.FrequencyBucket;
-import com.logslim.query.FrequencyDelta;
 import com.logslim.query.TemplateQueryService;
 import com.logslim.query.TemplateQueryService.SlotStats;
 import com.logslim.query.TemplateQueryService.TemplateDetailFull;
@@ -71,43 +69,6 @@ public class TemplateController {
                 .collect(Collectors.toList());
     }
 
-    @GetMapping("/timeline/compare")
-    public List<Map<String, Object>> timelineCompare(
-            @RequestParam String observed,
-            @RequestParam String baseline,
-            @RequestParam(defaultValue = "50") int limit) {
-
-        Duration observedDuration = parseDuration(observed);
-        Duration baselineDuration = parseDuration(baseline);
-        return queryService.compareFrequencies(observedDuration, baselineDuration, limit)
-                .stream()
-                .map(this::frequencyDeltaToMap)
-                .collect(Collectors.toList());
-    }
-
-    @GetMapping("/timeline/trend")
-    public Map<Long, List<Map<String, Object>>> timelineTrend(
-            @RequestParam String window,
-            @RequestParam(defaultValue = "24") int buckets) {
-
-        Duration windowDuration = parseDuration(window);
-        Map<Long, List<FrequencyBucket>> trends = queryService.getFrequencyTimeseries(windowDuration, buckets);
-
-        Map<Long, List<Map<String, Object>>> result = new java.util.LinkedHashMap<>();
-        for (var entry : trends.entrySet()) {
-            List<Map<String, Object>> bucketMaps = entry.getValue().stream().map(b ->
-                Map.<String, Object>of(
-                    "bucketNum", b.bucketNum(),
-                    "timestamp", b.timestamp(),
-                    "frequency", b.frequency(),
-                    "changeFromPrevious", b.changeFromPrevious() != null ? b.changeFromPrevious() : 0.0
-                )
-            ).collect(Collectors.toList());
-            result.put(entry.getKey(), bucketMaps);
-        }
-        return result;
-    }
-
     private Map<String, Object> toMap(Template t) {
         return Map.of(
             "id",        t.getId(),
@@ -115,20 +76,6 @@ public class TemplateController {
             "hits",      t.getOccurrences(),
             "createdAt", t.getCreatedAt().toEpochMilli(),
             "updatedAt", t.getUpdatedAt().toEpochMilli()
-        );
-    }
-
-    private Map<String, Object> frequencyDeltaToMap(FrequencyDelta delta) {
-        return Map.of(
-            "id",              delta.template().getId(),
-            "pattern",         delta.template().getPattern(),
-            "observedCount",   delta.observedCount(),
-            "baselineCount",   delta.baselineCount(),
-            "changePercent",   delta.changePercent(),
-            "isNew",           delta.isNew(),
-            "disappeared",     delta.disappeared(),
-            "createdAt",       delta.template().getCreatedAt().toEpochMilli(),
-            "updatedAt",       delta.template().getUpdatedAt().toEpochMilli()
         );
     }
 
