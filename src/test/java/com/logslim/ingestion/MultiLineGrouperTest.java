@@ -98,6 +98,51 @@ class MultiLineGrouperTest {
         assertThat(result).isEmpty();
     }
 
+    @Test
+    void pythonTraceback_groupedUnderTimestampHeader() {
+        String input = """
+                2026-05-19 16:51:33.508 [ERROR] worker-queue — Countdown task missed
+                Traceback (most recent call last):
+                  File "/app/workers/email_worker.py", line 67, in send_transactional_email
+                    smtp.sendmail(sender, [recipient], msg.as_string())
+                smtplib.SMTPException: SMTP AUTH extension not supported by server.
+                2026-05-19 16:51:34.059 [INFO ] auth-service — OAuth2 login success
+                """;
+        List<LogGroup> result = groups(input);
+        assertThat(result).hasSize(2);
+        assertThat(result.get(0).headerLine()).startsWith("2026-05-19 16:51:33.508");
+        assertThat(result.get(0).continuationLines()).hasSize(4);
+        assertThat(result.get(1).headerLine()).startsWith("2026-05-19 16:51:34.059");
+        assertThat(result.get(1).isMultiLine()).isFalse();
+    }
+
+    @Test
+    void timestampedHeaders_consecutive_eachOwnGroup() {
+        String input = """
+                2026-05-19 16:51:29.006 [INFO ] notification — Template published
+                2026-05-19 16:51:29.504 [DEBUG] auth-service — MFA TOTP verified
+                """;
+        List<LogGroup> result = groups(input);
+        assertThat(result).hasSize(2);
+        assertThat(result.get(0).isMultiLine()).isFalse();
+        assertThat(result.get(1).isMultiLine()).isFalse();
+    }
+
+    @Test
+    void startsWithTimestamp_isoSpace_true() {
+        assertThat(MultiLineGrouper.startsWithTimestamp("2026-05-19 16:51:29.006 [INFO] x")).isTrue();
+    }
+
+    @Test
+    void startsWithTimestamp_isoT_true() {
+        assertThat(MultiLineGrouper.startsWithTimestamp("2026-05-19T16:51:29 something")).isTrue();
+    }
+
+    @Test
+    void startsWithTimestamp_plainText_false() {
+        assertThat(MultiLineGrouper.startsWithTimestamp("Traceback (most recent call last):")).isFalse();
+    }
+
     // --- isContinuation static method unit tests ---
 
     @Test

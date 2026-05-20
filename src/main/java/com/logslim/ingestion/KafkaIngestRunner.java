@@ -46,13 +46,13 @@ public class KafkaIngestRunner {
     }
 
     public void consume(String topic,
-                        String bootstrapServers,
-                        String groupId,
-                        String source,
-                        int batchSize,
-                        Duration flushInterval,
-                        Duration compactInterval,
-                        boolean fromBeginning) {
+            String bootstrapServers,
+            String groupId,
+            String source,
+            int batchSize,
+            Duration flushInterval,
+            Duration compactInterval,
+            boolean fromBeginning) {
 
         Path dataDir = resolveDataDir();
 
@@ -71,7 +71,8 @@ public class KafkaIngestRunner {
 
         try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
             consumer.subscribe(List.of(topic));
-            log.info("logslim consume — subscribed to '{}' (group={}, source={}, batch={}, flush={}, compact={}, fromBeginning={})",
+            log.info(
+                    "logslim consume — subscribed to '{}' (group={}, source={}, batch={}, flush={}, compact={}, fromBeginning={})",
                     topic, groupId, source, batchSize, flushInterval, compactInterval, fromBeginning);
 
             // If --from-beginning is set, force seekToBeginning AFTER the first
@@ -101,12 +102,13 @@ public class KafkaIngestRunner {
 
                 for (ConsumerRecord<String, String> r : records) {
                     String value = r.value();
-                    if (value == null || value.isEmpty()) continue;
+                    if (value == null || value.isEmpty())
+                        continue;
                     batch.add(toLogGroup(value, source));
                 }
 
-                boolean sizeFull   = batch.size() >= batchSize;
-                boolean timeUp     = Duration.between(lastFlush, Instant.now()).compareTo(flushInterval) >= 0;
+                boolean sizeFull = batch.size() >= batchSize;
+                boolean timeUp = Duration.between(lastFlush, Instant.now()).compareTo(flushInterval) >= 0;
                 if (!batch.isEmpty() && (sizeFull || timeUp)) {
                     int n = batch.size();
                     extractor.processBatch(batch);
@@ -160,11 +162,15 @@ public class KafkaIngestRunner {
         String header = value.substring(0, nl);
         String[] tail = value.substring(nl + 1).split("\n", -1);
         List<String> continuation = new ArrayList<>(tail.length);
-        for (String t : tail) continuation.add(t);
+        for (String t : tail)
+            continuation.add(t);
         return new LogGroup(header, continuation, source);
     }
 
-    /** Mirrors CompactCommand.resolveDataDir so periodic compact targets the same Parquet dir. */
+    /**
+     * Mirrors CompactCommand.resolveDataDir so periodic compact targets the same
+     * Parquet dir.
+     */
     private Path resolveDataDir() {
         String base = dbPath.endsWith(".duckdb")
                 ? dbPath.substring(0, dbPath.length() - ".duckdb".length())
@@ -175,7 +181,13 @@ public class KafkaIngestRunner {
     /** Mutable shutdown flag — flipped by JVM hook, read by the poll loop. */
     private static final class ShutdownState {
         private volatile boolean stop = false;
-        void requestShutdown() { stop = true; }
-        boolean shutdown()     { return stop; }
+
+        void requestShutdown() {
+            stop = true;
+        }
+
+        boolean shutdown() {
+            return stop;
+        }
     }
 }
