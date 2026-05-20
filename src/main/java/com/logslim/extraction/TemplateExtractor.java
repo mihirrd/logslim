@@ -20,14 +20,15 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Orchestrates the full extraction pipeline for a single log line:
- *   parse → pre-mask → Drain matching → template DB sync → store log entry
+ * parse → pre-mask → Drain matching → template DB sync → store log entry
  *
  * Pre-masking converts tokens already classified as DYNAMIC by TokenClassifier
  * into wildcards before passing to Drain, so the regex knowledge bootstraps
  * the algorithm and is not re-learned from scratch.
  *
  * Lines processed while a Drain cluster is still learning (pre-lock) are stored
- * as raw_logs.  Once a cluster locks it is written to the templates table and all
+ * as raw_logs. Once a cluster locks it is written to the templates table and
+ * all
  * subsequent matching lines are stored as structured log_entries.
  */
 @Component
@@ -35,13 +36,13 @@ public class TemplateExtractor {
 
     private static final Logger log = LoggerFactory.getLogger(TemplateExtractor.class);
 
-    private final LogTokenizer     tokenizer;
+    private final LogTokenizer tokenizer;
     private final TemplateNormalizer normalizer;
-    private final DrainTree         drainTree;
-    private final TemplateCache     cache;
-    private final TemplateDao       templateDao;
-    private final LogEntryDao       logEntryDao;
-    private final RawLogDao         rawLogDao;
+    private final DrainTree drainTree;
+    private final TemplateCache cache;
+    private final TemplateDao templateDao;
+    private final LogEntryDao logEntryDao;
+    private final RawLogDao rawLogDao;
 
     @Value("${logslim.template.max-count:100000}")
     private long maxTemplateCount;
@@ -50,19 +51,19 @@ public class TemplateExtractor {
     private final Map<String, Template> drainPatternToTemplate = new ConcurrentHashMap<>();
 
     public TemplateExtractor(LogTokenizer tokenizer,
-                             TemplateNormalizer normalizer,
-                             DrainTree drainTree,
-                             TemplateCache cache,
-                             TemplateDao templateDao,
-                             LogEntryDao logEntryDao,
-                             RawLogDao rawLogDao) {
-        this.tokenizer   = tokenizer;
-        this.normalizer  = normalizer;
-        this.drainTree   = drainTree;
-        this.cache       = cache;
+            TemplateNormalizer normalizer,
+            DrainTree drainTree,
+            TemplateCache cache,
+            TemplateDao templateDao,
+            LogEntryDao logEntryDao,
+            RawLogDao rawLogDao) {
+        this.tokenizer = tokenizer;
+        this.normalizer = normalizer;
+        this.drainTree = drainTree;
+        this.cache = cache;
         this.templateDao = templateDao;
         this.logEntryDao = logEntryDao;
-        this.rawLogDao   = rawLogDao;
+        this.rawLogDao = rawLogDao;
     }
 
     /** Seed the Drain tree from all templates already stored in the DB. */
@@ -96,8 +97,8 @@ public class TemplateExtractor {
     }
 
     public Template process(LogGroup group) {
-        ParsedLog parsed   = tokenizer.tokenize(group.headerLine(), group.source());
-        List<Token> orig   = parsed.tokens();
+        ParsedLog parsed = tokenizer.tokenize(group.headerLine(), group.source());
+        List<Token> orig = parsed.tokens();
         List<String> masked = toPreMasked(orig);
 
         DrainTree.ProcessResult drain = drainTree.process(masked);
@@ -140,12 +141,13 @@ public class TemplateExtractor {
 
     /**
      * Return the persisted Template for this cluster, creating it in the DB
-     * on first lock.  Returns null if the template-count cap is reached.
+     * on first lock. Returns null if the template-count cap is reached.
      */
     private Template resolveTemplate(DrainTree.ProcessResult drain, List<Token> origTokens) {
         String raw = rawPattern(drain.templateTokens());
         Template existing = drainPatternToTemplate.get(raw);
-        if (existing != null) return existing;
+        if (existing != null)
+            return existing;
 
         // Just locked — write to DB for the first time
         if (templateDao.count() >= maxTemplateCount) {
@@ -172,7 +174,8 @@ public class TemplateExtractor {
     private String buildTypedPattern(List<String> templateTokens, List<Token> origTokens) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < templateTokens.size(); i++) {
-            if (i > 0) sb.append(' ');
+            if (i > 0)
+                sb.append(' ');
             String tok = templateTokens.get(i);
             if (DrainTree.WILDCARD.equals(tok)) {
                 String value = i < origTokens.size() ? origTokens.get(i).value() : null;
@@ -184,7 +187,10 @@ public class TemplateExtractor {
         return sb.toString();
     }
 
-    /** Extract actual parameter values from the original tokens at wildcard positions. */
+    /**
+     * Extract actual parameter values from the original tokens at wildcard
+     * positions.
+     */
     private static List<String> extractParamValues(List<String> templateTokens, List<Token> origTokens) {
         List<String> params = new ArrayList<>();
         for (int i = 0; i < templateTokens.size(); i++) {
