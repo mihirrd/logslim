@@ -9,6 +9,11 @@ logs_data/
 
 # Log files
 *.log
+*.jsonl
+
+# Repomix / codebase dumps
+logslim.md
+repomix-output.*
 
 # Next.js / Node
 dashboard/.next/

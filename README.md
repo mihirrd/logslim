@@ -39,7 +39,7 @@ Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
 
 ```bash
 # Build from source
-git clone https://github.com/<username>/logslim
+git clone https://github.com/mihirrd/logslim
 cd logslim
 mvn clean package -q
 alias logslim="java -jar $(pwd)/target/logslim-1.0.0.jar"
@@ -275,3 +275,9 @@ The test suite covers:
 If you're adding a new feature, add integration tests in `src/test/java/com/logslim/integration/` that verify the invariants that matter most: **losslessness**, **correct grouping**, and **temporal order**.
 
 Open an issue first for large changes so we can discuss the approach before you invest the time.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
