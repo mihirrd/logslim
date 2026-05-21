@@ -58,9 +58,16 @@ public class LogQueryService {
                     .collect(Collectors.toList());
         }
 
-        return entries.stream()
-                .map(reconstructor::reconstruct)
-                .collect(Collectors.toList());
+        List<String> lines = new ArrayList<>(entries.size());
+        for (LogEntry e : entries) {
+            try {
+                lines.add(reconstructor.reconstruct(e));
+            } catch (RuntimeException ex) {
+                lines.add("[!] reconstruction failed for entry " + e.getId()
+                        + " (template " + e.getTemplateId() + "): " + ex.getMessage());
+            }
+        }
+        return lines;
     }
 
     public List<String> replayLogs(Duration window) {
@@ -93,7 +100,13 @@ public class LogQueryService {
         for (LogEntry entry : entries) {
             Template t = templatesById.get(entry.getTemplateId());
             if (t == null) continue;
-            String header = reconstructor.reconstruct(t.getPattern(), entry.getParameterValues());
+            String header;
+            try {
+                header = reconstructor.reconstruct(t.getPattern(), entry.getParameterValues());
+            } catch (RuntimeException e) {
+                header = "[!] reconstruction failed for entry " + entry.getId()
+                        + " (template " + entry.getTemplateId() + "): " + e.getMessage();
+            }
             String cont = entry.getContinuationText();
             String line = cont != null && !cont.isEmpty() ? header + "\n" + cont : header;
             Instant ts = entry.getLogTimestamp() != null ? entry.getLogTimestamp() : Instant.EPOCH;
