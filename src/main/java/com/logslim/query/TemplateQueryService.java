@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 @Service
 public class TemplateQueryService {
@@ -53,6 +54,19 @@ public class TemplateQueryService {
 
     public List<Template> searchTemplates(String text, int limit) {
         return templateDao.findByPatternContaining(text, limit);
+    }
+
+    public List<Map.Entry<Long, Long>> getTimeSeries(long templateId, Instant from, Instant to, Duration bucket) {
+        long bucketMillis = bucket.toMillis();
+        if (bucketMillis <= 0) bucketMillis = Duration.ofMinutes(1).toMillis();
+
+        TreeMap<Long, Long> buckets = new TreeMap<>();
+        for (LogEntry e : logEntryDao.findByTemplateIdAndTimeRange(templateId, from, to)) {
+            long ts = e.getLogTimestamp().toEpochMilli();
+            long bucketStart = (ts / bucketMillis) * bucketMillis;
+            buckets.merge(bucketStart, 1L, Long::sum);
+        }
+        return new ArrayList<>(buckets.entrySet());
     }
 
     public List<Template> getAnomalies(Duration window) {

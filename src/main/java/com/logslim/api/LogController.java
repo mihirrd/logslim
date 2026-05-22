@@ -1,6 +1,7 @@
 package com.logslim.api;
 
 import com.logslim.query.LogQueryService;
+import com.logslim.storage.RawLogDao;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -20,9 +21,11 @@ public class LogController {
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final LogQueryService queryService;
+    private final RawLogDao rawLogDao;
 
-    public LogController(LogQueryService queryService) {
+    public LogController(LogQueryService queryService, RawLogDao rawLogDao) {
         this.queryService = queryService;
+        this.rawLogDao = rawLogDao;
     }
 
     @PostMapping("/query")
@@ -47,6 +50,33 @@ public class LogController {
         }
         Duration window = last != null ? parseDuration(last) : null;
         return queryService.replayLogs(window, clamped);
+    }
+
+    @GetMapping("/raw-logs")
+    public List<Map<String, Object>> rawLogs(
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String last,
+            @RequestParam(required = false) String search,
+            @RequestParam(defaultValue = "500") int limit) {
+
+        int clamped = Math.max(1, Math.min(limit, 5000));
+        Instant f, t;
+        if (from != null || to != null) {
+            f = from != null ? parseInstant(from) : Instant.EPOCH;
+            t = to   != null ? parseInstant(to)   : Instant.now();
+        } else {
+            Duration window = last != null ? parseDuration(last) : Duration.ofHours(1);
+            t = Instant.now();
+            f = t.minus(window);
+        }
+        return rawLogDao.findByTimeRangeAndSearch(f, t, search, clamped).stream()
+                .map(r -> Map.<String, Object>of(
+                        "id",      r.getId(),
+                        "content", r.getContent(),
+                        "ts",      r.getLogTimestamp().toEpochMilli(),
+                        "source",  r.getSource()))
+                .toList();
     }
 
     @GetMapping("/suggestions")
