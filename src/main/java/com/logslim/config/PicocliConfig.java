@@ -16,6 +16,7 @@ public class PicocliConfig {
             InspectCommand inspect,
             QueryCommand query,
             ReplayCommand replay,
+            RawLogsCommand rawLogs,
             CompactCommand compact,
             ServeCommand serve,
             ConsumeCommand consume) {
@@ -25,6 +26,7 @@ public class PicocliConfig {
         cmd.addSubcommand("inspect", inspect);
         cmd.addSubcommand("query", query);
         cmd.addSubcommand("replay", replay);
+        cmd.addSubcommand("raw-logs", rawLogs);
         cmd.addSubcommand("compact", compact);
         cmd.addSubcommand("serve", serve);
         cmd.addSubcommand("consume", consume);

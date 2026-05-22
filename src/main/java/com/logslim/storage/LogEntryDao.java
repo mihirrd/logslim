@@ -112,6 +112,36 @@ public class LogEntryDao {
         return n == null ? 0 : n;
     }
 
+    public Map<Long, Long> countByTemplateInRange(Instant from, Instant to) {
+        String sql = """
+                SELECT template_id, COUNT(*) AS cnt
+                FROM log_entries
+                WHERE log_timestamp >= :from AND log_timestamp <= :to
+                GROUP BY template_id
+                """;
+        Map<Long, Long> result = new java.util.HashMap<>();
+        jdbc.query(sql,
+                Map.of("from", from.toEpochMilli(), "to", to.toEpochMilli()),
+                (org.springframework.jdbc.core.RowCallbackHandler)
+                rs -> result.put(rs.getLong("template_id"), rs.getLong("cnt")));
+        return result;
+    }
+
+    public List<LogEntry> findByTemplateIdAndTimeRange(long templateId, Instant from, Instant to) {
+        String sql = """
+                SELECT * FROM log_entries
+                WHERE template_id = :tid
+                AND log_timestamp >= :from AND log_timestamp <= :to
+                ORDER BY log_timestamp ASC
+                """;
+        return jdbc.query(sql,
+                new MapSqlParameterSource()
+                        .addValue("tid",  templateId)
+                        .addValue("from", from.toEpochMilli())
+                        .addValue("to",   to.toEpochMilli()),
+                ROW_MAPPER);
+    }
+
     private MapSqlParameterSource entryToParams(LogEntry entry) {
         return new MapSqlParameterSource()
                 .addValue("templateId",   entry.getTemplateId())

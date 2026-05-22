@@ -39,18 +39,20 @@ public class LogQueryService {
      * Returns reconstructed original log lines, in timestamp order.
      */
     public List<String> queryByPattern(String pattern, Map<String, String> filters, Duration window) {
+        Instant to   = Instant.now();
+        Instant from = window != null ? to.minus(window) : Instant.EPOCH;
+        return queryByPattern(pattern, filters, from, to);
+    }
+
+    public List<String> queryByPattern(String pattern, Map<String, String> filters, Instant from, Instant to) {
         Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
         if (templateOpt.isEmpty()) return List.of();
 
         Template template = templateOpt.get();
-        Instant from = window != null ? Instant.now().minus(window) : Instant.EPOCH;
-        Instant to   = Instant.now();
-
         List<LogEntry> entries = logEntryDao.findByTimeRange(from, to).stream()
                 .filter(e -> e.getTemplateId() == template.getId())
                 .collect(Collectors.toList());
 
-        // Apply parameter filters (rebuild named map from pattern + positional values)
         if (!filters.isEmpty()) {
             final Template tmpl = template;
             entries = entries.stream()

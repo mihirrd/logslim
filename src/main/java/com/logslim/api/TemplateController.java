@@ -10,8 +10,11 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -56,6 +59,40 @@ public class TemplateController {
                 .map(this::detailToMap)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    @GetMapping("/templates/{id}/timeseries")
+    public ResponseEntity<Map<String, Object>> timeseries(
+            @PathVariable long id,
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String last,
+            @RequestParam(defaultValue = "1m") String bucket) {
+
+        if (queryService.getTemplate(id, 0).isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        Duration bucketDuration = parseDuration(bucket);
+        Instant f, t;
+        if (from != null || to != null) {
+            f = from != null ? parseInstant(from) : Instant.EPOCH;
+            t = to   != null ? parseInstant(to)   : Instant.now();
+        } else {
+            Duration window = last != null ? parseDuration(last) : Duration.ofHours(1);
+            t = Instant.now();
+            f = t.minus(window);
+        }
+
+        List<Map<String, Object>> series = queryService.getTimeSeries(id, f, t, bucketDuration)
+                .stream()
+                .map(e -> Map.<String, Object>of("ts", e.getKey(), "count", e.getValue()))
+                .collect(Collectors.toList());
+
+        return ResponseEntity.ok(Map.of(
+                "templateId", id,
+                "bucketMs",   bucketDuration.toMillis(),
+                "series",     series));
     }
 
     @GetMapping("/anomalies")
@@ -118,11 +155,22 @@ public class TemplateController {
         }
     }
 
+    private static final DateTimeFormatter LOCAL_FMT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    private Instant parseInstant(String s) {
+        try { return Instant.parse(s); } catch (DateTimeParseException ignored) {}
+        try { return LocalDateTime.parse(s, LOCAL_FMT).toInstant(ZoneOffset.UTC); }
+        catch (DateTimeParseException ignored) {}
+        return Instant.EPOCH;
+    }
+
     private Duration parseDuration(String s) {
         s = s.trim().toLowerCase();
         if (s.endsWith("d")) return Duration.ofDays(Long.parseLong(s.replace("d", "")));
         if (s.endsWith("h")) return Duration.ofHours(Long.parseLong(s.replace("h", "")));
         if (s.endsWith("m")) return Duration.ofMinutes(Long.parseLong(s.replace("m", "")));
+        if (s.endsWith("s")) return Duration.ofSeconds(Long.parseLong(s.replace("s", "")));
         return Duration.ofHours(1);
     }
 }

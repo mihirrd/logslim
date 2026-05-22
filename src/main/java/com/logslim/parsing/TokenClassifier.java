@@ -35,6 +35,10 @@ public class TokenClassifier {
     private static final Pattern PROC_PID =
             Pattern.compile("[A-Za-z][\\w.-]*\\[\\d+\\]:?");
 
+    public boolean isTimestamp(String stripped) {
+        return TIMESTAMP.matcher(stripped).matches();
+    }
+
     public TokenType classify(String value) {
         if (value == null || value.isEmpty()) {
             return TokenType.STATIC;

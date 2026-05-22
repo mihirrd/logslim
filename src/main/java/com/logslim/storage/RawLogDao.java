@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+
 @Repository
 public class RawLogDao {
 
@@ -55,16 +56,33 @@ public class RawLogDao {
     }
 
     public List<RawLog> findByTimeRange(Instant from, Instant to, int limit) {
-        String sql = """
-                SELECT * FROM raw_logs
-                WHERE log_timestamp >= :from AND log_timestamp <= :to
-                ORDER BY log_timestamp ASC, log_id ASC
-                LIMIT :limit
-                """;
-        return jdbc.query(sql,
-                Map.of("from", InstantUtil.format(from),
-                       "to",   InstantUtil.format(to),
-                       "limit", limit),
-                ROW_MAPPER);
+        return findByTimeRangeAndSearch(from, to, null, limit);
+    }
+
+    public List<RawLog> findByTimeRangeAndSearch(Instant from, Instant to, String search, int limit) {
+        MapSqlParameterSource params = new MapSqlParameterSource()
+                .addValue("from",  InstantUtil.format(from))
+                .addValue("to",    InstantUtil.format(to))
+                .addValue("limit", limit);
+
+        String sql;
+        if (search != null && !search.isBlank()) {
+            sql = """
+                    SELECT * FROM raw_logs
+                    WHERE log_timestamp >= :from AND log_timestamp <= :to
+                    AND content LIKE '%' || :search || '%'
+                    ORDER BY log_timestamp ASC, log_id ASC
+                    LIMIT :limit
+                    """;
+            params.addValue("search", search);
+        } else {
+            sql = """
+                    SELECT * FROM raw_logs
+                    WHERE log_timestamp >= :from AND log_timestamp <= :to
+                    ORDER BY log_timestamp ASC, log_id ASC
+                    LIMIT :limit
+                    """;
+        }
+        return jdbc.query(sql, params, ROW_MAPPER);
     }
 }

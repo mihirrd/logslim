@@ -3,11 +3,24 @@ package com.logslim.parsing;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
 @Component
 public class LogTokenizer {
+
+    private static final List<DateTimeFormatter> TIMESTAMP_FORMATTERS = List.of(
+        // With offset: 2025-12-29T09:56:43.968+0530
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXX"),
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXX"),
+        // Without offset (assume UTC)
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").withZone(ZoneOffset.UTC),
+        DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(ZoneOffset.UTC),
+        // Date only (midnight UTC)
+        DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC)
+    );
 
     private final TokenClassifier classifier;
 
@@ -35,7 +48,45 @@ public class LogTokenizer {
             tokens.add(new Token(part, type, i));
         }
 
-        return new ParsedLog(tokens, rawLine, Instant.now(), source);
+        Instant timestamp = extractTimestamp(tokens);
+        return new ParsedLog(tokens, rawLine, timestamp, source);
+    }
+
+    private Instant extractTimestamp(List<Token> tokens) {
+        for (int i = 0; i < tokens.size(); i++) {
+            String stripped = stripPunctuation(tokens.get(i).value());
+            if (!classifier.isTimestamp(stripped)) continue;
+
+            // Full datetime in one token (e.g. 2026-05-09T18:33:47.902Z)
+            if (stripped.length() > 10) {
+                Instant ts = tryParseTimestamp(stripped);
+                if (ts != null) return ts;
+            }
+
+            // Date-only token — try combining with the next token as time
+            // (e.g. "2026-05-19" + "16:51:29.006" or "09:56:43,968+0530")
+            if (i + 1 < tokens.size()) {
+                String next = stripPunctuation(tokens.get(i + 1).value());
+                String combined = stripped + "T" + next.replace(',', '.');
+                Instant ts = tryParseTimestamp(combined);
+                if (ts != null) return ts;
+            }
+
+            // Date only — use midnight UTC as approximation
+            Instant ts = tryParseTimestamp(stripped);
+            if (ts != null) return ts;
+
+            break; // only attempt the first timestamp-shaped token
+        }
+        return Instant.now();
+    }
+
+    private Instant tryParseTimestamp(String value) {
+        try { return Instant.parse(value); } catch (Exception ignored) {}
+        for (DateTimeFormatter fmt : TIMESTAMP_FORMATTERS) {
+            try { return fmt.parse(value, Instant::from); } catch (Exception ignored) {}
+        }
+        return null;
     }
 
     /**

@@ -35,6 +35,7 @@ out/
 # IDE — VS Code
 .vscode/
 *.code-workspace
+.claude/
 
 # IDE — Eclipse
 .eclipse/
