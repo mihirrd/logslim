@@ -5,6 +5,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Collection;
@@ -83,6 +84,21 @@ public class TemplateDao {
                 " SET occurrences = occurrences + 1, updated_at = :now " +
                 "WHERE template_id = :id";
         jdbc.update(sql, Map.of("id", templateId, "now", InstantUtil.format(Instant.now())));
+    }
+
+    @Transactional
+    public void incrementOccurrencesBatch(Map<Long, Long> deltas) {
+        if (deltas.isEmpty()) return;
+        String sql = "UPDATE " + writeTarget.tableFor("templates") +
+                " SET occurrences = occurrences + :delta, updated_at = :now WHERE template_id = :id";
+        String nowStr = InstantUtil.format(Instant.now());
+        MapSqlParameterSource[] params = deltas.entrySet().stream()
+                .map(e -> new MapSqlParameterSource()
+                        .addValue("id",    e.getKey())
+                        .addValue("delta", e.getValue())
+                        .addValue("now",   nowStr))
+                .toArray(MapSqlParameterSource[]::new);
+        jdbc.batchUpdate(sql, params);
     }
 
     /**

@@ -99,7 +99,7 @@ public class MultiLineGrouper implements Iterable<LogGroup> {
                 }
             }
 
-            return new LogGroup(header, continuations, source);
+            return new LogGroup(header, continuations, source, null);
         }
 
         private String readLine() {

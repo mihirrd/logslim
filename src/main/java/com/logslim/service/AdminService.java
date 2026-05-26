@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
 import java.util.List;
 
 @Service
@@ -24,6 +25,11 @@ public class AdminService {
      * `templates(template_id)`.
      */
     private static final List<String> CORE_TABLES_DROP_ORDER = List.of("log_entries", "raw_logs", "templates");
+
+    // Tables whose archive is append-only partitioned Parquet directories.
+    // Each compact appends one new partition file; existing partitions are never touched.
+    // This makes compact cost O(live tail) instead of O(total archive).
+    private static final List<String> PARTITIONED_TABLES = List.of("log_entries", "raw_logs");
 
     private final JdbcTemplate jdbc;
     private final WriteTarget writeTarget;
@@ -43,9 +49,11 @@ public class AdminService {
      * capture MAX(id), drop the table, then build the three-object layout
      * ({name}_archive view + {name}_live writable table + unified {name} view).
      *
-     * - Re-compact (already compacted): copy the unified-view contents (archive
-     * ∪ live) to a fresh Parquet file, drop everything, then rebuild the
-     * layout from scratch.
+     * - Re-compact (already compacted): for log_entries and raw_logs, append
+     * only the current live tail as a new partition file — existing partitions
+     * are never rewritten (O(tail) cost). For templates, rewrite the single
+     * templates.parquet in full (templates are mutable/bounded and a full rewrite
+     * avoids duplicate-pattern bugs).
      *
      * After this returns, reads continue against {name} (now a view), and writes
      * via the DAOs land in {name}_live.
@@ -53,22 +61,43 @@ public class AdminService {
     public void compactDatabase(Path dataDir) {
         jdbc.execute("BEGIN TRANSACTION");
         dataDir.toFile().mkdirs();
-        Path templatesParquet = dataDir.resolve("templates.parquet");
-        Path logEntriesParquet = dataDir.resolve("log_entries.parquet");
-        Path rawLogsParquet = dataDir.resolve("raw_logs.parquet");
 
-        // Write to .parquet.new first so the COPY never overwrites a file that
-        // an _archive view is currently mapping. After all reads are done and
-        // catalog is torn down, atomically rename the temp files into place.
+        // templates → single flat file (full rewrite each compact, mutable + bounded)
+        Path templatesParquet = dataDir.resolve("templates.parquet");
         Path templatesTmp = dataDir.resolve("templates.parquet.new");
-        Path logEntriesTmp = dataDir.resolve("log_entries.parquet.new");
-        Path rawLogsTmp = dataDir.resolve("raw_logs.parquet.new");
+
+        // log_entries and raw_logs → partition directories; each compact appends one file
+        Path logEntriesDir = dataDir.resolve("log_entries");
+        Path rawLogsDir = dataDir.resolve("raw_logs");
+
+        // Determine whether this is first compact (base tables exist) or re-compact.
+        boolean alreadyCompacted = isCompacted();
+
+        // Source table for partitioned tables:
+        // - first compact: read the entire base table (it's the only data)
+        // - re-compact: read only _live (existing partitions stay as-is)
+        String logEntriesSource = alreadyCompacted ? "log_entries_live" : "log_entries";
+        String rawLogsSource = alreadyCompacted ? "raw_logs_live" : "raw_logs";
+
+        // New partition file path (write to .new, then rename into the dir).
+        long partSeq = System.currentTimeMillis();
+        String partName = String.format("part-%016d.parquet", partSeq);
+        String partNameTmp = partName + ".new";
+
+        Path logEntriesPartTmp = null;
+        Path rawLogsPartTmp = null;
+
         try {
-            // 1. Snapshot current state to TEMP Parquet files. Reads through the
-            // unified view (archive + live) and writes to a separate filename.
+            logEntriesDir.toFile().mkdirs();
+            rawLogsDir.toFile().mkdirs();
+
+            logEntriesPartTmp = logEntriesDir.resolve(partNameTmp);
+            rawLogsPartTmp = rawLogsDir.resolve(partNameTmp);
+
+            // 1. Snapshot templates (full rewrite) and live tails (new partition only).
             copyToParquet("templates", templatesTmp);
-            copyToParquet("log_entries", logEntriesTmp);
-            copyToParquet("raw_logs", rawLogsTmp);
+            copyToParquet(logEntriesSource, logEntriesPartTmp);
+            copyToParquet(rawLogsSource, rawLogsPartTmp);
 
             // 2. Capture MAX(id) BEFORE we drop, so live sequences start past the archive.
             long templatesMaxId = maxId("templates", "template_id");
@@ -76,43 +105,43 @@ public class AdminService {
             long rawLogsMaxId = maxId("raw_logs", "log_id");
 
             // 3. Tear down whatever's currently there. Order matters:
-            // - Unified views first (they depend on _archive and _live).
-            // - In the un-compacted case the same loop drops base tables in
-            // FK-safe order (log_entries → raw_logs → templates).
-            // - Then the _archive and _live objects (no-op pre-compact).
-            // - Then sequences.
+            // unified views first, then _archive/_live objects, then sequences.
             for (String name : CORE_TABLES_DROP_ORDER)
                 dropObject(name);
             dropHybridLayoutIfPresent();
             dropSequencesIfExist();
 
-            // 4. With the catalog cleared, swap the new Parquet files into place.
+            // 4. With the catalog cleared, atomically move files into place.
             try {
                 Files.move(templatesTmp, templatesParquet, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                Files.move(logEntriesTmp, logEntriesParquet, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                Files.move(rawLogsTmp, rawLogsParquet, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Path logEntriesPart = logEntriesDir.resolve(partName);
+                Files.move(logEntriesPartTmp, logEntriesPart, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                logEntriesPartTmp = null;
+                Path rawLogsPart = rawLogsDir.resolve(partName);
+                Files.move(rawLogsPartTmp, rawLogsPart, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                rawLogsPartTmp = null;
             } catch (java.io.IOException e) {
                 throw new RuntimeException(
                         "Compact failed while swapping Parquet files: " + e.getMessage(), e);
             }
 
             // 5. Rebuild the three-object layout fresh.
-            buildHybridLayout(templatesParquet, logEntriesParquet, rawLogsParquet,
+            buildHybridLayout(templatesParquet, logEntriesDir, rawLogsDir,
                     templatesMaxId, logEntriesMaxId, rawLogsMaxId);
             writeTarget.invalidate();
             jdbc.execute("COMMIT");
             jdbc.execute("CHECKPOINT");
         } catch (Exception e) {
             jdbc.execute("ROLLBACK");
-            for (Path tmp : List.of(templatesTmp, logEntriesTmp, rawLogsTmp)) {
-                try {
-                    Files.deleteIfExists(tmp);
-                } catch (IOException ignored) {
-                }
+            try { Files.deleteIfExists(templatesTmp); } catch (IOException ignored) {}
+            if (logEntriesPartTmp != null) {
+                try { Files.deleteIfExists(logEntriesPartTmp); } catch (IOException ignored) {}
+            }
+            if (rawLogsPartTmp != null) {
+                try { Files.deleteIfExists(rawLogsPartTmp); } catch (IOException ignored) {}
             }
             throw new RuntimeException("Compact failed: " + e.getMessage(), e);
         }
-
     }
 
     private void copyToParquet(String unsuffixed, Path target) {
@@ -140,20 +169,51 @@ public class AdminService {
         jdbc.execute("DROP SEQUENCE IF EXISTS raw_logs_id_seq");
     }
 
-    private void buildHybridLayout(Path templatesParquet, Path logEntriesParquet,
-            Path rawLogsParquet,
+    /**
+     * Build the archive view SQL for a partitioned table directory.
+     * If the directory has at least one .parquet file, use read_parquet glob.
+     * Otherwise return an empty typed select so the view always has the right schema.
+     */
+    private String partitionedArchiveViewSql(String name, Path partDir) {
+        File[] parts = partDir.toFile().listFiles(
+                (d, n) -> n.endsWith(".parquet") && !n.endsWith(".new"));
+        if (parts != null && parts.length > 0) {
+            return "SELECT * FROM read_parquet('" + partDir.toAbsolutePath() + "/*.parquet')";
+        }
+        // No partitions yet — return a zero-row typed select matching the live table schema.
+        if ("log_entries".equals(name)) {
+            return "SELECT CAST(NULL AS BIGINT) AS entry_id, " +
+                   "CAST(NULL AS BIGINT) AS template_id, " +
+                   "CAST(NULL AS BIGINT) AS log_timestamp, " +
+                   "CAST(NULL AS TEXT) AS parameter_values, " +
+                   "CAST(NULL AS TEXT) AS continuation_text " +
+                   "WHERE false";
+        } else { // raw_logs
+            return "SELECT CAST(NULL AS BIGINT) AS log_id, " +
+                   "CAST(NULL AS TEXT) AS content, " +
+                   "CAST(NULL AS TEXT) AS log_timestamp, " +
+                   "CAST(NULL AS TEXT) AS source, " +
+                   "CAST(NULL AS TEXT) AS created_at " +
+                   "WHERE false";
+        }
+    }
+
+    private void buildHybridLayout(Path templatesParquet, Path logEntriesDir,
+            Path rawLogsDir,
             long templatesMaxId, long logEntriesMaxId, long rawLogsMaxId) {
         try {
-            // Archive views over Parquet (immutable).
+            // Archive view over templates Parquet (single file, full rewrite each compact).
             jdbc.execute("CREATE VIEW templates_archive AS SELECT * FROM read_parquet('"
                     + templatesParquet.toAbsolutePath() + "')");
-            jdbc.execute("CREATE VIEW log_entries_archive AS SELECT * FROM read_parquet('"
-                    + logEntriesParquet.toAbsolutePath() + "')");
-            jdbc.execute("CREATE VIEW raw_logs_archive AS SELECT * FROM read_parquet('"
-                    + rawLogsParquet.toAbsolutePath() + "')");
+
+            // Archive views over partition directories; glob expands across all sealed partitions.
+            jdbc.execute("CREATE VIEW log_entries_archive AS "
+                    + partitionedArchiveViewSql("log_entries", logEntriesDir));
+            jdbc.execute("CREATE VIEW raw_logs_archive AS "
+                    + partitionedArchiveViewSql("raw_logs", rawLogsDir));
 
             // Live writable tables — column types must match the un-compacted production
-            // schema (schema.sql) so the UNION view in step below is type-compatible with
+            // schema (schema.sql) so the UNION view below is type-compatible with
             // the archive Parquet. In particular `log_timestamp` is BIGINT (epoch ms).
             jdbc.execute("CREATE SEQUENCE templates_id_seq START " + (templatesMaxId + 1));
             jdbc.execute("""
@@ -234,15 +294,16 @@ public class AdminService {
                 dropObject(name);
             dropHybridLayoutIfPresent();
             dropSequencesIfExist();
-            // (clearDatabase already had this order; kept here for parity.)
 
-            // Wipe Parquet files on disk (best-effort).
+            // Wipe Parquet files and partition directories on disk (best-effort).
             Path dataDir = resolveDataDir();
-            for (String base : CORE_TABLES) {
-                try {
-                    Files.deleteIfExists(dataDir.resolve(base + ".parquet"));
-                } catch (Exception ignored) {
-                    /* best-effort */ }
+            // templates is a flat file
+            try {
+                Files.deleteIfExists(dataDir.resolve("templates.parquet"));
+            } catch (Exception ignored) { /* best-effort */ }
+            // log_entries and raw_logs are partition directories
+            for (String name : PARTITIONED_TABLES) {
+                deleteDirectoryTree(dataDir.resolve(name));
             }
             // Try to remove the now-empty data dir; harmless if non-empty.
             try {
@@ -260,14 +321,29 @@ public class AdminService {
         }
     }
 
-    public long calculateParquetSize(Path dataDir) {
-        String templatesParquet = dataDir.resolve("templates.parquet").toAbsolutePath().toString();
-        String logEntriesParquet = dataDir.resolve("log_entries.parquet").toAbsolutePath().toString();
-        String rawLogsParquet = dataDir.resolve("raw_logs.parquet").toAbsolutePath().toString();
+    /** Recursively delete a directory tree (best-effort; ignores errors). */
+    private void deleteDirectoryTree(Path dir) {
+        if (!Files.exists(dir)) return;
+        try {
+            Files.walk(dir)
+                 .sorted(Comparator.reverseOrder())
+                 .forEach(p -> { try { Files.deleteIfExists(p); } catch (IOException ignored) {} });
+        } catch (IOException ignored) {}
+    }
 
-        return new File(templatesParquet).length()
-                + new File(logEntriesParquet).length()
-                + new File(rawLogsParquet).length();
+    /**
+     * Sum the sizes of all Parquet data: templates flat file + partition dirs.
+     */
+    public long calculateParquetSize(Path dataDir) {
+        long total = dataDir.resolve("templates.parquet").toFile().length();
+        for (String name : PARTITIONED_TABLES) {
+            File partDir = dataDir.resolve(name).toFile();
+            File[] parts = partDir.listFiles((d, n) -> n.endsWith(".parquet") && !n.endsWith(".new"));
+            if (parts != null) {
+                for (File f : parts) total += f.length();
+            }
+        }
+        return total;
     }
 
     private Path resolveDataDir() {

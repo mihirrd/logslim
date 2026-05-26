@@ -35,28 +35,46 @@ public class TokenClassifier {
     private static final Pattern PROC_PID =
             Pattern.compile("[A-Za-z][\\w.-]*\\[\\d+\\]:?");
 
+    public record Classification(TokenType type, TokenSubtype subtype) {
+        static final Classification STATIC = new Classification(TokenType.STATIC, TokenSubtype.NONE);
+    }
+
     public boolean isTimestamp(String stripped) {
         return TIMESTAMP.matcher(stripped).matches();
     }
 
-    public TokenType classify(String value) {
-        if (value == null || value.isEmpty()) {
-            return TokenType.STATIC;
-        }
-        if (UUID.matcher(value).matches())      return TokenType.DYNAMIC;
-        if (TIMESTAMP.matcher(value).matches()) return TokenType.DYNAMIC;
-        if (TIME.matcher(value).matches())      return TokenType.DYNAMIC;
-        if (HEX_HASH.matcher(value).matches())  return TokenType.DYNAMIC;
-        if (NUMBER.matcher(value).matches())    return TokenType.DYNAMIC;
-        if (IPV4.matcher(value).matches())      return TokenType.DYNAMIC;
-        if (PROC_PID.matcher(value).matches())  return TokenType.DYNAMIC;
-
-        // key=value token (e.g. user_id=64, product_id=abc123): classify by the value part
+    /**
+     * Single-pass classification: returns both type and subtype without running
+     * each regex twice. Call this instead of classify() + classifySubtype().
+     */
+    public Classification classifyFull(String value) {
+        if (value == null || value.isEmpty()) return Classification.STATIC;
+        if (UUID.matcher(value).matches())      return new Classification(TokenType.DYNAMIC, TokenSubtype.UUID);
+        if (TIMESTAMP.matcher(value).matches()) return new Classification(TokenType.DYNAMIC, TokenSubtype.TS);
+        if (TIME.matcher(value).matches())      return new Classification(TokenType.DYNAMIC, TokenSubtype.TIME);
+        if (HEX_HASH.matcher(value).matches())  return new Classification(TokenType.DYNAMIC, TokenSubtype.HASH);
+        if (NUMBER.matcher(value).matches())    return new Classification(TokenType.DYNAMIC, TokenSubtype.NUM);
+        if (IPV4.matcher(value).matches())      return new Classification(TokenType.DYNAMIC, TokenSubtype.IP);
+        if (PROC_PID.matcher(value).matches())  return new Classification(TokenType.DYNAMIC, TokenSubtype.PROC);
         int eq = value.indexOf('=');
         if (eq > 0 && eq < value.length() - 1) {
-            return classify(value.substring(eq + 1));
+            Classification inner = classifyFull(value.substring(eq + 1));
+            if (inner.type() == TokenType.DYNAMIC) {
+                return new Classification(TokenType.DYNAMIC, TokenSubtype.KV);
+            }
         }
+        return Classification.STATIC;
+    }
 
-        return TokenType.STATIC;
+    public TokenType classify(String value) {
+        return classifyFull(value).type();
+    }
+
+    /**
+     * Classify the dynamic subtype of an already-stripped token value.
+     * Returns {@link TokenSubtype#NONE} for static tokens.
+     */
+    public TokenSubtype classifySubtype(String value) {
+        return classifyFull(value).subtype();
     }
 }
