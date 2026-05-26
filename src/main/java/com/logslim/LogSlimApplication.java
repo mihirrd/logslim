@@ -6,14 +6,11 @@ import org.springframework.cache.annotation.EnableCaching;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.List;
 import com.logslim.storage.StartupUtils;
 
 @SpringBootApplication
 @EnableCaching
 public class LogSlimApplication {
-
-    private static final List<String> CORE_TABLES = List.of("templates", "log_entries", "raw_logs");
 
     public static void main(String[] args) {
         if (args.length > 0 && "serve".equals(args[0])) {
@@ -29,7 +26,7 @@ public class LogSlimApplication {
             // bootstrap a snapshot of the current tables here so the user
             // doesn't have to run a separate compact just to start the server.
             try {
-                StartupUtils.ensureSnapshot(dbPath, dataDir, CORE_TABLES);
+                StartupUtils.ensureSnapshot(dbPath, dataDir);
             } catch (Exception e) {
                 System.err.println("ERROR: Failed to bootstrap Parquet snapshot at "
                         + dataDir + ": " + e.getMessage());

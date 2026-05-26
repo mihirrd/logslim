@@ -161,7 +161,7 @@ class EndToEndPipelineTest {
                 "\tat com.example.Svc.get(Svc.java:18)",
                 "Caused by: java.sql.SQLException: timeout");
 
-        extractor.process(new LogGroup(header, continuations, "test"));
+        extractor.process(new LogGroup(header, continuations, "test", null));
 
         List<LogEntry> entries = logEntryDao.findByTimeRange(Instant.EPOCH, Instant.now());
         assertThat(entries).hasSize(1);

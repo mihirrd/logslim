@@ -1,13 +1,15 @@
 package com.logslim.storage;
 
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
-
-import java.time.Instant;
-import java.util.List;
-import java.util.Map;
+import org.springframework.transaction.annotation.Transactional;
 
 
 @Repository
@@ -15,6 +17,9 @@ public class RawLogDao {
 
     private final NamedParameterJdbcTemplate jdbc;
     private final WriteTarget writeTarget;
+
+    @Value("${logslim.storage.batch-insert-size:500}")
+    private int batchSize;
 
     private static final RowMapper<RawLog> ROW_MAPPER = (rs, rowNum) -> new RawLog(
             rs.getLong("log_id"),
@@ -44,6 +49,25 @@ public class RawLogDao {
         Long id = jdbc.queryForObject(sql, params, Long.class);
         rawLog.setId(id);
         return rawLog;
+    }
+
+    @Transactional
+    public void insertBatch(List<RawLog> rawLogs) {
+        String sql = "INSERT INTO " + writeTarget.tableFor("raw_logs") +
+                " (content, log_timestamp, source, created_at) " +
+                "VALUES (:content, :logTs, :source, :createdAt)";
+        Instant now = Instant.now();
+        for (int i = 0; i < rawLogs.size(); i += batchSize) {
+            List<RawLog> chunk = rawLogs.subList(i, Math.min(i + batchSize, rawLogs.size()));
+            MapSqlParameterSource[] batchParams = chunk.stream()
+                    .map(r -> new MapSqlParameterSource()
+                            .addValue("content",   r.getContent())
+                            .addValue("logTs",     InstantUtil.format(r.getLogTimestamp()))
+                            .addValue("source",    r.getSource())
+                            .addValue("createdAt", InstantUtil.format(r.getCreatedAt() != null ? r.getCreatedAt() : now)))
+                    .toArray(MapSqlParameterSource[]::new);
+            jdbc.batchUpdate(sql, batchParams);
+        }
     }
 
     public long count() {

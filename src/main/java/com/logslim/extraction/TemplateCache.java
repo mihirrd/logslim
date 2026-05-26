@@ -5,6 +5,7 @@ import com.logslim.storage.TemplateDao;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.util.Map;
 import java.util.Optional;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -52,6 +53,16 @@ public class TemplateCache {
         template.setOccurrences(template.getOccurrences() + 1);
         cache.put(template.getPattern(), template);
         templateDao.incrementOccurrences(template.getId());
+    }
+
+    /** Update in-memory occurrence counts after a batch DB flush (no DB write). */
+    public void refreshBatch(Map<Long, Long> deltas) {
+        cache.asMap().forEach((pattern, template) -> {
+            Long delta = deltas.get(template.getId());
+            if (delta != null) {
+                template.setOccurrences(template.getOccurrences() + delta);
+            }
+        });
     }
 
     /** Invalidate a single entry (e.g. after eviction). */

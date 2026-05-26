@@ -63,6 +63,13 @@ public class KafkaIngestRunner {
         props.put("auto.offset.reset", fromBeginning ? "earliest" : "latest");
         props.put("key.deserializer", StringDeserializer.class.getName());
         props.put("value.deserializer", StringDeserializer.class.getName());
+        // Allow the broker to accumulate up to batchSize records per poll so a
+        // single poll() fills a full batch rather than requiring multiple round-trips.
+        props.put("max.poll.records", String.valueOf(batchSize));
+        // Wait for at least 64 KB before returning a fetch response; reduces
+        // round-trips when records are arriving faster than one-at-a-time.
+        props.put("fetch.min.bytes", "65536");
+        props.put("fetch.max.wait.ms", "500");
 
         // Track shutdown via a volatile flag flipped by the shutdown hook so an
         // in-flight poll/batch can drain cleanly.
@@ -104,7 +111,11 @@ public class KafkaIngestRunner {
                     String value = r.value();
                     if (value == null || value.isEmpty())
                         continue;
-                    batch.add(toLogGroup(value, source));
+                    // r.timestamp() is the Kafka record timestamp: epoch ms, always UTC.
+                    // Use it as the authoritative timestamp so log lines without an
+                    // explicit timezone offset are stored in UTC rather than being
+                    // parsed as an ambiguous local-time string.
+                    batch.add(toLogGroup(value, source, Instant.ofEpochMilli(r.timestamp())));
                 }
 
                 boolean sizeFull = batch.size() >= batchSize;
@@ -150,21 +161,17 @@ public class KafkaIngestRunner {
         }
     }
 
-    private static LogGroup toLogGroup(String value, String source) {
-        // Most Kafka log records are a single line. If the payload contains
-        // newlines (e.g. an embedded stack trace), treat the first line as
-        // the header and the rest as continuation — same shape as the
-        // file-input MultiLineGrouper produces.
+    private static LogGroup toLogGroup(String value, String source, Instant kafkaTimestamp) {
         int nl = value.indexOf('\n');
         if (nl < 0) {
-            return LogGroup.singleLine(value, source);
+            return LogGroup.singleLine(value, source, kafkaTimestamp);
         }
         String header = value.substring(0, nl);
         String[] tail = value.substring(nl + 1).split("\n", -1);
         List<String> continuation = new ArrayList<>(tail.length);
         for (String t : tail)
             continuation.add(t);
-        return new LogGroup(header, continuation, source);
+        return new LogGroup(header, continuation, source, kafkaTimestamp);
     }
 
     /**

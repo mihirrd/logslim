@@ -7,18 +7,29 @@ import java.sql.DriverManager;
 import java.sql.Statement;
 import java.util.List;
 
+/**
+ * Bootstrap utility: ensures the Parquet snapshot required by the dashboard
+ * exists before the server starts.
+ *
+ * Layout (post-compact):
+ *   <dataDir>/templates.parquet          — flat file, full rewrite each compact
+ *   <dataDir>/log_entries/*.parquet      — partition dir, append-only
+ *   <dataDir>/raw_logs/*.parquet         — partition dir, append-only
+ *
+ * If templates.parquet is absent (no compact has run yet), this method opens
+ * the writer DuckDB, bootstraps the schema, and writes initial snapshots:
+ * a flat templates.parquet and a first partition in each partition directory.
+ */
 public class StartupUtils {
-    public static void ensureSnapshot(String dbPath, Path dataDir, List<String> coreTables) throws Exception {
+
+    private static final List<String> PARTITIONED = List.of("log_entries", "raw_logs");
+
+    public static void ensureSnapshot(String dbPath, Path dataDir) throws Exception {
         Files.createDirectories(dataDir);
 
-        boolean allPresent = true;
-        for (String t : coreTables) {
-            if (!Files.exists(dataDir.resolve(t + ".parquet"))) {
-                allPresent = false;
-                break;
-            }
-        }
-        if (allPresent)
+        // Only check templates.parquet — partition dirs may legitimately be
+        // empty on first serve (no data ingested yet).
+        if (Files.exists(dataDir.resolve("templates.parquet")))
             return;
 
         System.out.println("Bootstrapping Parquet snapshot at " + dataDir + " ...");
@@ -56,16 +67,22 @@ public class StartupUtils {
             s.execute("CREATE INDEX IF NOT EXISTS idx_le_template  ON log_entries(template_id)");
             s.execute("CREATE INDEX IF NOT EXISTS idx_le_timestamp ON log_entries(log_timestamp)");
 
-            // Snapshot current data (or empty) to Parquet. If
-            // templates/log_entries/raw_logs
-            // happen to be unified VIEWS post-compact and the Parquet they reference is
-            // missing, this COPY will fail loudly — that's the right behaviour
-            // (broken state needs manual repair, not silent bootstrap).
-            for (String t : coreTables) {
-                Path target = dataDir.resolve(t + ".parquet");
-                s.execute("COPY (SELECT * FROM " + t + ") TO '" +
-                        target.toAbsolutePath() +
-                        "' (FORMAT PARQUET, COMPRESSION ZSTD)");
+            // templates → flat file (as before)
+            Path templatesTarget = dataDir.resolve("templates.parquet");
+            s.execute("COPY (SELECT * FROM templates) TO '" +
+                    templatesTarget.toAbsolutePath() + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
+
+            // log_entries and raw_logs → first partition in each directory.
+            // If tables happen to be unified VIEWS post-compact and Parquet is missing,
+            // this COPY fails loudly — broken state needs manual repair, not silent bootstrap.
+            long partSeq = System.currentTimeMillis();
+            String partName = String.format("part-%016d.parquet", partSeq);
+            for (String name : PARTITIONED) {
+                Path partDir = dataDir.resolve(name);
+                Files.createDirectories(partDir);
+                Path partTarget = partDir.resolve(partName);
+                s.execute("COPY (SELECT * FROM " + name + ") TO '" +
+                        partTarget.toAbsolutePath() + "' (FORMAT PARQUET, COMPRESSION ZSTD)");
             }
         }
     }
