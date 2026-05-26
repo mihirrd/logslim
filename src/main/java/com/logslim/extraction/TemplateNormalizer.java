@@ -1,6 +1,7 @@
 package com.logslim.extraction;
 
 import com.logslim.parsing.Token;
+import com.logslim.parsing.TokenSubtype;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -26,10 +27,36 @@ public class TemplateNormalizer {
             if (t.isStatic()) {
                 sb.append(t.value());
             } else {
-                sb.append(placeholderFor(t.value()));
+                sb.append(placeholderFor(t));
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Determine placeholder using the pre-classified subtype stored on the token.
+     * Falls back to the value-based path for tokens constructed without a subtype.
+     */
+    public String placeholderFor(Token t) {
+        if (t == null) return "{val}";
+        TokenSubtype sub = t.subtype();
+        if (sub != TokenSubtype.NONE) {
+            return switch (sub) {
+                case UUID -> "{uuid}";
+                case TS   -> "{ts}";
+                case TIME -> "{time}";
+                case HASH -> "{hash}";
+                case IP   -> "{ip}";
+                case PROC -> "{proc}";
+                case KV   -> {
+                    int eq = t.value().indexOf('=');
+                    yield eq > 0 ? "{" + t.value().substring(0, eq) + "}" : "{val}";
+                }
+                case NUM  -> "{num}";
+                default   -> placeholderFor(t.value());
+            };
+        }
+        return placeholderFor(t.value());
     }
 
     /**
@@ -103,7 +130,7 @@ public class TemplateNormalizer {
 
         for (Token t : tokens) {
             if (t.isDynamic()) {
-                String base = placeholderFor(t.value()).replace("{", "").replace("}", "");
+                String base = placeholderFor(t).replace("{", "").replace("}", "");
                 int count = counters.getOrDefault(base, 0);
                 String key = count == 0 ? base : base + "_" + count;
                 counters.put(base, count + 1);

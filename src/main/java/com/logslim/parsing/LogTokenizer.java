@@ -44,8 +44,8 @@ public class LogTokenizer {
             String part = parts[i];
             // Strip surrounding punctuation for classification purposes but preserve in value
             String stripped = stripPunctuation(part);
-            TokenType type = classifier.classify(stripped);
-            tokens.add(new Token(part, type, i));
+            TokenClassifier.Classification cls = classifier.classifyFull(stripped);
+            tokens.add(new Token(part, cls.type(), i, cls.subtype(), stripped));
         }
 
         Instant timestamp = extractTimestamp(tokens);
@@ -54,7 +54,7 @@ public class LogTokenizer {
 
     private Instant extractTimestamp(List<Token> tokens) {
         for (int i = 0; i < tokens.size(); i++) {
-            String stripped = stripPunctuation(tokens.get(i).value());
+            String stripped = tokens.get(i).stripped();
             if (!classifier.isTimestamp(stripped)) continue;
 
             // Full datetime in one token (e.g. 2026-05-09T18:33:47.902Z)
@@ -66,7 +66,7 @@ public class LogTokenizer {
             // Date-only token — try combining with the next token as time
             // (e.g. "2026-05-19" + "16:51:29.006" or "09:56:43,968+0530")
             if (i + 1 < tokens.size()) {
-                String next = stripPunctuation(tokens.get(i + 1).value());
+                String next = tokens.get(i + 1).stripped();
                 String combined = stripped + "T" + next.replace(',', '.');
                 Instant ts = tryParseTimestamp(combined);
                 if (ts != null) return ts;
