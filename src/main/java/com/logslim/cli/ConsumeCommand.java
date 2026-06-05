@@ -53,6 +53,11 @@ public class ConsumeCommand implements Runnable {
             description = "Reset offsets to the earliest available on subscribe.")
     private boolean fromBeginning;
 
+    @Option(names = "--max-records", defaultValue = "-1",
+            description = "Exit after ingesting this many records. "
+                    + "Useful for benchmarking. -1 means unlimited (default: ${DEFAULT-VALUE}).")
+    private long maxRecords;
+
     public ConsumeCommand(KafkaIngestRunner runner) {
         this.runner = runner;
     }
@@ -60,6 +65,6 @@ public class ConsumeCommand implements Runnable {
     @Override
     public void run() {
         runner.consume(topic, bootstrapServers, groupId, source,
-                batchSize, flushInterval, compactInterval, fromBeginning);
+                batchSize, flushInterval, compactInterval, fromBeginning, maxRecords);
     }
 }

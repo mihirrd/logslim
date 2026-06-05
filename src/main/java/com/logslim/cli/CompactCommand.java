@@ -48,7 +48,11 @@ public class CompactCommand implements Runnable {
             }
         }
 
-        adminService.compactDatabase(dataDir);
+        boolean ran = adminService.compactDatabase(dataDir);
+        if (!ran) {
+            System.out.println("Nothing to compact — live tail is empty.");
+            return;
+        }
 
         long dbAfter = new File(dbPath).length();
         long parquetTotal = adminService.calculateParquetSize(dataDir);
