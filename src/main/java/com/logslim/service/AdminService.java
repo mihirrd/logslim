@@ -58,7 +58,19 @@ public class AdminService {
      * After this returns, reads continue against {name} (now a view), and writes
      * via the DAOs land in {name}_live.
      */
-    public void compactDatabase(Path dataDir) {
+    /**
+     * @return true if compaction ran, false if the live tail was empty and nothing needed doing.
+     */
+    public boolean compactDatabase(Path dataDir) {
+        // Determine whether this is first compact (base tables exist) or re-compact.
+        boolean alreadyCompacted = isCompacted();
+
+        // Skip if the live tail is empty — nothing new to flush to Parquet.
+        if (alreadyCompacted) {
+            Long liveCount = jdbc.queryForObject("SELECT COUNT(*) FROM log_entries_live", Long.class);
+            if (liveCount == null || liveCount == 0) return false;
+        }
+
         jdbc.execute("BEGIN TRANSACTION");
         dataDir.toFile().mkdirs();
 
@@ -69,9 +81,6 @@ public class AdminService {
         // log_entries and raw_logs → partition directories; each compact appends one file
         Path logEntriesDir = dataDir.resolve("log_entries");
         Path rawLogsDir = dataDir.resolve("raw_logs");
-
-        // Determine whether this is first compact (base tables exist) or re-compact.
-        boolean alreadyCompacted = isCompacted();
 
         // Source table for partitioned tables:
         // - first compact: read the entire base table (it's the only data)
@@ -131,6 +140,7 @@ public class AdminService {
             writeTarget.invalidate();
             jdbc.execute("COMMIT");
             jdbc.execute("CHECKPOINT");
+            return true;
         } catch (Exception e) {
             jdbc.execute("ROLLBACK");
             try { Files.deleteIfExists(templatesTmp); } catch (IOException ignored) {}
