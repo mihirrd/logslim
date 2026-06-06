@@ -1,0 +1,8 @@
+src/
+dashboard/
+docs/
+benchmarks/
+bench_data/
+.github/
+*.md
+.git/
