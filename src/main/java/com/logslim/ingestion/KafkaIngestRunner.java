@@ -56,7 +56,8 @@ public class KafkaIngestRunner {
             int batchSize,
             Duration flushInterval,
             Duration compactInterval,
-            boolean fromBeginning) {
+            boolean fromBeginning,
+            long maxRecords) {
 
         Path dataDir = resolveDataDir();
 
@@ -99,7 +100,7 @@ public class KafkaIngestRunner {
             Instant lastCompact = Instant.now();
             long totalIngested = 0;
 
-            while (!state.shutdown()) {
+            while (!state.shutdown() && (maxRecords < 0 || totalIngested < maxRecords)) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
                 if (rewindPending && !consumer.assignment().isEmpty()) {

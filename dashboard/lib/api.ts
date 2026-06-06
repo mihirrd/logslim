@@ -1,4 +1,4 @@
-const BASE = "http://localhost:8080/api";
+const BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080/api";
 
 function qs(params: Record<string, string | number | undefined>) {
   const p = new URLSearchParams();

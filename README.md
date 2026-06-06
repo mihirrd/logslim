@@ -53,6 +53,131 @@ java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-1.0.0.jar run --input 
 
 ---
 
+## Docker
+
+Pull the latest image:
+
+```bash
+docker pull mihirrd/logslim:latest
+```
+
+In production, pin to a specific version rather than `latest` to avoid unexpected changes:
+
+```bash
+docker pull mihirrd/logslim:1.3.0 
+```
+
+LogSlim stores state in a DuckDB file and a Parquet data directory. Always mount a host directory so data persists across container restarts:
+
+```bash
+mkdir -p ./data
+```
+
+Set up a shell alias to avoid repeating the `docker run` boilerplate:
+
+```bash
+alias logslim='docker run --rm -v $(pwd)/data:/data mihirrd/logslim:latest'
+```
+
+All examples below assume this alias. The database is written to `./data/logs.duckdb` on the host.
+
+### Ingest a log file
+
+```bash
+logslim run --input /data/app.log
+```
+
+The file must be inside the mounted volume so the container can reach it. Copy it first if needed:
+
+```bash
+cp /var/log/app.log ./data/
+logslim run --input /data/app.log
+```
+
+### Compact to Parquet
+
+```bash
+logslim compact --yes
+```
+
+Exports all data to `/data/logs_data/` as compressed Parquet and shrinks the `.duckdb` file to metadata only. Run this periodically to reclaim disk space.
+
+### Start the API server
+
+```bash
+docker run --rm \
+  -v $(pwd)/data:/data \
+  -p 8080:8080 \
+  mihirrd/logslim:latest serve
+```
+
+The `-p 8080:8080` flag exposes the API on the host. The dashboard at `http://localhost:3000` connects to it automatically.
+
+### Query templates
+
+```bash
+logslim templates --limit 10
+logslim templates --search "failed login"
+logslim templates --last 1h --limit 5
+```
+
+### Inspect a template
+
+```bash
+logslim inspect <template-id> --recent 10
+```
+
+### Query by pattern
+
+```bash
+logslim query "User {id} failed login" --last 24h
+logslim query "User {id} failed login" --filter id=456 --last 24h
+```
+
+### Replay original logs
+
+```bash
+logslim replay --last 1h
+logslim replay --from 2024-01-15T00:00:00Z --to 2024-01-15T23:59:59Z
+```
+
+### Continuous ingestion from Kafka
+
+If Kafka is running on the host machine:
+
+```bash
+docker run --rm \
+  -v $(pwd)/data:/data \
+  --network host \
+  mihirrd/logslim:latest \
+  consume \
+  --topic app-logs \
+  --bootstrap-servers localhost:9092 \
+  --batch-size 5000 \
+  --flush-interval PT5S \
+  --compact-interval PT10M
+```
+
+If Kafka is running in another Docker container, connect them via a shared network:
+
+```bash
+docker run --rm \
+  -v $(pwd)/data:/data \
+  --network <kafka-network> \
+  mihirrd/logslim:latest \
+  consume \
+  --topic app-logs \
+  --bootstrap-servers <kafka-container-name>:9092
+```
+
+Find the network name with:
+
+```bash
+docker inspect <kafka-container-name> --format '{{json .NetworkSettings.Networks}}' | jq 'keys[]'
+```
+
+---
+
 ## Web Dashboard
 
 LogSlim ships with a Next.js dashboard for exploring logs without the CLI.
@@ -255,6 +380,27 @@ Set via `-D` flags or `application.properties`:
 ```bash
 java -Dlogslim.drain.lock-after-n=5 -jar logslim-2.0.0.jar run --input app.log
 ```
+
+---
+
+## CI / CD
+
+### CI (runs on every push and pull request)
+
+A GitHub Actions workflow runs `mvn test` automatically on every push to `main` and every pull request targeting `main`. This ensures the build stays green before any code lands.
+
+### Release workflow
+
+Releases are triggered by pushing a version tag:
+```bash
+
+```
+
+The workflow then:
+1. Syncs the version in `pom.xml` to match the tag
+2. Builds the fat JAR (with tests)
+3. Creates a GitHub Release with auto-generated release notes and the JAR attached
+4. Builds and pushes a Docker image to Docker Hub
 
 ---
 
