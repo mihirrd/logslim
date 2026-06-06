@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
+import java.util.stream.Collectors;
 
 /**
  * Long-running Kafka consumer that batches incoming records and writes them
@@ -39,6 +40,9 @@ public class KafkaIngestRunner {
 
     @Value("${logslim.db.path:logs.duckdb}")
     private String dbPath;
+
+    @Value("${logslim.ingestion.dlq.topic:}")
+    private String dlqTopic;
 
     public KafkaIngestRunner(TemplateExtractor extractor, AdminService adminService) {
         this.extractor = extractor;
@@ -76,7 +80,8 @@ public class KafkaIngestRunner {
         final ShutdownState state = new ShutdownState();
         Runtime.getRuntime().addShutdownHook(new Thread(state::requestShutdown, "logslim-consume-shutdown"));
 
-        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+             DeadLetterProducer dlq = new DeadLetterProducer(bootstrapServers, dlqTopic)) {
             consumer.subscribe(List.of(topic));
             log.info(
                     "logslim consume — subscribed to '{}' (group={}, source={}, batch={}, flush={}, compact={}, fromBeginning={})",
@@ -88,11 +93,11 @@ public class KafkaIngestRunner {
             // explicit seek works regardless.
             boolean rewindPending = fromBeginning;
 
-            List<LogGroup> batch = new ArrayList<>(batchSize);
-            Instant lastFlush = Instant.now();
+            List<LogGroup> batch    = new ArrayList<>(batchSize);
+            List<String>   rawBatch = new ArrayList<>(batchSize);
+            Instant lastFlush   = Instant.now();
             Instant lastCompact = Instant.now();
             long totalIngested = 0;
-            long flushes = 0;
 
             while (!state.shutdown()) {
                 ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
@@ -116,18 +121,15 @@ public class KafkaIngestRunner {
                     // explicit timezone offset are stored in UTC rather than being
                     // parsed as an ambiguous local-time string.
                     batch.add(toLogGroup(value, source, Instant.ofEpochMilli(r.timestamp())));
+                    rawBatch.add(value);
                 }
 
                 boolean sizeFull = batch.size() >= batchSize;
                 boolean timeUp = Duration.between(lastFlush, Instant.now()).compareTo(flushInterval) >= 0;
                 if (!batch.isEmpty() && (sizeFull || timeUp)) {
-                    int n = batch.size();
-                    extractor.processBatch(batch);
-                    consumer.commitSync();
-                    totalIngested += n;
-                    flushes++;
-                    log.info("flushed batch of {} records (total {})", n, totalIngested);
+                    totalIngested += flushBatch(batch, rawBatch, consumer, dlq);
                     batch.clear();
+                    rawBatch.clear();
                     lastFlush = Instant.now();
                 }
 
@@ -140,14 +142,62 @@ public class KafkaIngestRunner {
             // Drain the in-flight batch on shutdown before the consumer closes.
             if (!batch.isEmpty()) {
                 log.info("draining {} buffered records before shutdown", batch.size());
-                extractor.processBatch(batch);
-                consumer.commitSync();
-                totalIngested += batch.size();
+                totalIngested += flushBatch(batch, rawBatch, consumer, dlq);
                 batch.clear();
+                rawBatch.clear();
             }
             runCompact(dataDir);
             log.info("logslim consume — shutdown complete (total ingested: {})", totalIngested);
         }
+    }
+
+    /**
+     * Flush a batch to the extractor. On failure, falls back to per-record
+     * processing so a single poison pill cannot stall the consumer indefinitely.
+     * Offsets are committed regardless of per-record outcomes so the consumer
+     * always advances past the failed batch.
+     *
+     * @return number of records that reached the extractor (excluding DLQ'd ones)
+     */
+    private long flushBatch(List<LogGroup> batch, List<String> rawBatch,
+                            KafkaConsumer<String, String> consumer,
+                            DeadLetterProducer dlq) {
+        try {
+            extractor.processBatch(batch);
+            consumer.commitSync();
+            log.info("flushed batch of {} records", batch.size());
+            return batch.size();
+        } catch (RuntimeException e) {
+            log.error("batch of {} records failed, falling back to per-record processing: {}",
+                    batch.size(), e.getMessage(), e);
+            long processed = processOneByOne(batch, rawBatch, dlq);
+            consumer.commitSync();
+            return processed;
+        }
+    }
+
+    /**
+     * Process each record individually after a batch failure.
+     * Records that throw are sent to the dead-letter producer instead of
+     * blocking the consumer.
+     */
+    private long processOneByOne(List<LogGroup> batch, List<String> rawBatch,
+                                 DeadLetterProducer dlq) {
+        long processed = 0;
+        int dlqCount   = 0;
+        for (int i = 0; i < batch.size(); i++) {
+            try {
+                extractor.process(batch.get(i));
+                processed++;
+            } catch (RuntimeException e) {
+                dlqCount++;
+                log.warn("poison pill at batch index {}: {} — sending to dead-letter",
+                        i, e.getMessage());
+                dlq.send(rawBatch.get(i));
+            }
+        }
+        log.info("per-record fallback: {} processed, {} sent to dead-letter", processed, dlqCount);
+        return processed;
     }
 
     private void runCompact(Path dataDir) {
