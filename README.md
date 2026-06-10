@@ -1,16 +1,30 @@
 # LogSlim
 
-**Lossless log compression that saves storage upto 80% — without losing a single line.**
+**Structured, queryable logs your AI agent can actually read — losslessly, at up to 80% less storage.**
 
-LogSlim is a CLI tool and web dashboard that extracts repeating log templates, separates the variable parameters, and stores everything in *compressed Parquet files*. 
+LogSlim turns unstructured log streams into **structured templates + parameters** automatically — no regex, no grok, no SDK. That structure is the point: it lets an AI agent investigate a service by reasoning over a few dozen *templates and their distributions* instead of drowning in (and paying for) millions of raw lines. LogSlim exposes this to agents through a built-in **MCP server**.
 
-Every original log line is exactly reconstructable on demand. 
+As a side effect of separating templates from parameters, the same data stores in compressed Parquet at up to **80% less space** — and every original line is still exactly reconstructable.
 
-Sits in front of your existing storage. No agent, No SDK changes, No vendor lock-in.
+Lossless. Sits in front of your existing storage. No agent, no SDK changes, no vendor lock-in.
 
 ---
 
 ![Product Preview](preview.gif)
+
+---
+
+## Why structure, not raw lines
+
+A busy service emits millions of log lines an hour. You cannot hand those to an LLM agent during an incident:
+
+- it doesn't fit a context window,
+- it costs a fortune per glance, and
+- the one line that matters is buried among thousands of near-duplicates (the "lost in the middle" problem).
+
+LogSlim collapses that firehose into **templates + counts + per-slot distributions**, *losslessly*. An agent then investigates the way a human SRE does — **overview → anomaly → drill → raw** — and pulls exact log lines only for the narrow window it actually needs.
+
+On the included `incident.log` (13,728 lines of a real DB-pool-exhaustion cascade), Drain extracts **22 templates**. A whole-service overview is a couple thousand tokens instead of ~400k of raw text, and the root-cause chain (deploy → dropped index → SeqScan → pool exhaustion → OOM → circuit breaker) surfaces at the *top* of the anomaly list rather than as a needle in a haystack.
 
 ---
 
@@ -27,55 +41,76 @@ Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
 
 2. **Pre-masking** handles well-known token types (numbers, UUIDs, IPs, hashes) immediately on the first occurrence, so common patterns lock after a single line.
 
-3. **Storage** separates templates from parameters. A template seen 5,000 times is stored once; only the 4 variable values per occurrence are stored. DuckDB's columnar encoding + zstd compression handles the rest.
+3. **Storage** separates templates from parameters. A template seen 5,000 times is stored once; only the variable values per occurrence are stored. DuckDB's columnar encoding + zstd compression handles the rest.
 
-4. **`logslim compact`** exports `log_entries` and `raw_logs` to Parquet files and replaces the tables with UNION ALL views. The database stays queryable after compaction.
+4. **`logslim compact`** exports `log_entries` and `raw_logs` to Parquet files and replaces the tables with `UNION ALL` views. The database stays queryable after compaction.
+
+---
+
+## For AI agents — the MCP server
+
+LogSlim ships an [MCP](https://modelcontextprotocol.io) server (`mcp/`) that exposes the structured-log API to agents (Claude Code/Desktop, Cursor, …) as **atomic, composable tools**. There is no opaque "answer" call — the agent composes the investigation, and each step ships *structure*, not raw text.
+
+| Tool | Cost | Role | Returns |
+|------|------|------|---------|
+| `list_templates`, `get_stats` | low | orient | the service's behavior as patterns + counts |
+| `template_counts` | low | detect | per-template counts in a window (`baseline=true` → window-vs-baseline ratios in one call) |
+| `new_templates` | low | detect | templates first seen (by log-event time) in a window — likely triggers |
+| `template_timeseries` | low | localize | bucketed counts for one template → pinpoint the onset minute |
+| `inspect_template` | low | drill | per-slot **distributions + numeric summaries** (min/max/avg/p50/p95), no rows pulled |
+| `query_logs` | low–med | drill | occurrences as **template once + parameter tuples** (projectable to specific columns) |
+| `raw_sample` | med | drill | a sample of unmatched/novel raw lines |
+| `replay` | **high** | raw | exact original lines for a **narrow** window — the lossless escape hatch |
+
+**Structure over text, by default.** `query_logs` returns the template once plus per-occurrence parameter tuples instead of repeating the static line skeleton on every row, and `inspect_template` answers "which values / how many / what distribution" from aggregates without pulling any occurrences. Measured on `incident.log`, 200 matches of one template cost ~3.1k tokens structured (vs ~6.8k as reconstructed text), or ~1k projected to a single field. Server `instructions` and an `investigate_incident` prompt steer the agent down this cost ladder — aggregates first, raw lines last.
+
+### Setup
+
+```bash
+# 1. start the API the MCP server talks to
+logslim serve                       # → http://localhost:8080
+
+# 2. build the MCP server
+cd mcp && npm install && npm run build
+
+# 3. register it with your agent (Claude Code shown)
+claude mcp add logslim -- node "$(pwd)/dist/index.js"
+```
+
+Configure via `LOGSLIM_API_URL` (default `http://localhost:8080`) and optional `LOGSLIM_API_KEY`. See [`mcp/README.md`](mcp/README.md) for the full tool reference and a no-agent smoke test.
 
 ---
 
 ## Installation
 
-**Requirements:** Java 17+, Node.js 18+ (dashboard only)
+**Requirements:** Java 17+, Node.js 18+ (dashboard and MCP server only)
 
 ```bash
 # Build from source
 git clone https://github.com/mihirrd/logslim
 cd logslim
 mvn clean package -q
-alias logslim="java -jar $(pwd)/target/logslim-1.0.0.jar"
+alias logslim="java -jar $(pwd)/target/logslim-1.1.0.jar"
 ```
 
 By default LogSlim reads and writes `logs.duckdb` in the current directory. Override with `-Dlogslim.db.path=`:
 
 ```bash
-java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-1.0.0.jar run --input <file>
+java -Dlogslim.db.path=/var/log/myapp.duckdb -jar logslim-1.1.0.jar run --input <file>
 ```
 
 ---
 
 ## Docker
 
-Pull the latest image:
-
 ```bash
-docker pull mihirrd/logslim:latest
+docker pull mihirrd/logslim:latest        # pin a version in production, e.g. :1.3.0
 ```
 
-In production, pin to a specific version rather than `latest` to avoid unexpected changes:
-
-```bash
-docker pull mihirrd/logslim:1.3.0 
-```
-
-LogSlim stores state in a DuckDB file and a Parquet data directory. Always mount a host directory so data persists across container restarts:
+LogSlim stores state in a DuckDB file and a Parquet data directory. Mount a host directory so data persists across container restarts, and set up an alias to avoid the `docker run` boilerplate:
 
 ```bash
 mkdir -p ./data
-```
-
-Set up a shell alias to avoid repeating the `docker run` boilerplate:
-
-```bash
 alias logslim='docker run --rm -v $(pwd)/data:/data mihirrd/logslim:latest'
 ```
 
@@ -84,13 +119,7 @@ All examples below assume this alias. The database is written to `./data/logs.du
 ### Ingest a log file
 
 ```bash
-logslim run --input /data/app.log
-```
-
-The file must be inside the mounted volume so the container can reach it. Copy it first if needed:
-
-```bash
-cp /var/log/app.log ./data/
+cp /var/log/app.log ./data/          # the file must be inside the mounted volume
 logslim run --input /data/app.log
 ```
 
@@ -100,116 +129,70 @@ logslim run --input /data/app.log
 logslim compact --yes
 ```
 
-Exports all data to `/data/logs_data/` as compressed Parquet and shrinks the `.duckdb` file to metadata only. Run this periodically to reclaim disk space.
+Exports all data to `/data/logs_data/` as compressed Parquet and shrinks the `.duckdb` file to metadata only. Run periodically to reclaim disk.
 
 ### Start the API server
 
 ```bash
-docker run --rm \
-  -v $(pwd)/data:/data \
-  -p 8080:8080 \
-  mihirrd/logslim:latest serve
+docker run --rm -v $(pwd)/data:/data -p 8080:8080 mihirrd/logslim:latest serve
 ```
 
-The `-p 8080:8080` flag exposes the API on the host. The dashboard at `http://localhost:3000` connects to it automatically.
-
-### Query templates
-
-```bash
-logslim templates --limit 10
-logslim templates --search "failed login"
-logslim templates --last 1h --limit 5
-```
-
-### Inspect a template
-
-```bash
-logslim inspect <template-id> --recent 10
-```
-
-### Query by pattern
-
-```bash
-logslim query "User {id} failed login" --last 24h
-logslim query "User {id} failed login" --filter id=456 --last 24h
-```
-
-### Replay original logs
-
-```bash
-logslim replay --last 1h
-logslim replay --from 2024-01-15T00:00:00Z --to 2024-01-15T23:59:59Z
-```
+The dashboard at `http://localhost:3000` and the MCP server connect to this.
 
 ### Continuous ingestion from Kafka
 
-If Kafka is running on the host machine:
-
 ```bash
-docker run --rm \
-  -v $(pwd)/data:/data \
-  --network host \
-  mihirrd/logslim:latest \
-  consume \
-  --topic app-logs \
-  --bootstrap-servers localhost:9092 \
-  --batch-size 5000 \
-  --flush-interval PT5S \
-  --compact-interval PT10M
+docker run --rm -v $(pwd)/data:/data --network host mihirrd/logslim:latest \
+  consume --topic app-logs --bootstrap-servers localhost:9092 \
+  --batch-size 5000 --flush-interval PT5S --compact-interval PT10M
 ```
 
-If Kafka is running in another Docker container, connect them via a shared network:
+If Kafka runs in another container, connect them via a shared `--network` and use the Kafka container name as the bootstrap host.
+
+---
+
+## CLI
 
 ```bash
-docker run --rm \
-  -v $(pwd)/data:/data \
-  --network <kafka-network> \
-  mihirrd/logslim:latest \
-  consume \
-  --topic app-logs \
-  --bootstrap-servers <kafka-container-name>:9092
-```
+# Templates — the structured overview
+logslim templates --limit 10
+logslim templates --search "failed login"
+logslim templates --last 1h --limit 5
 
-Find the network name with:
+# Inspect a template: per-slot value stats + recent reconstructed lines
+logslim inspect <template-id> --recent 10
 
-```bash
-docker inspect <kafka-container-name> --format '{{json .NetworkSettings.Networks}}' | jq 'keys[]'
+# Query by pattern, filter by slot value (indexed lookup, not a text scan)
+logslim query "User {id} failed login" --last 24h
+logslim query "User {id} failed login" --filter id=456 --last 24h
+
+# Replay exact original lines (lossless)
+logslim replay --last 1h
+logslim replay --from 2024-01-15T00:00:00Z --to 2024-01-15T23:59:59Z
 ```
 
 ---
 
 ## Web Dashboard
 
-LogSlim ships with a Next.js dashboard for exploring logs without the CLI.
+A Next.js dashboard for exploring logs without the CLI.
 
 ```bash
-# Terminal 1 — start the API server
-logslim serve
-# → LogSlim API server running on http://localhost:8080
-
-# Terminal 2 — start the dashboard
-cd dashboard && npm install && npm run dev
-# → http://localhost:3000
+logslim serve                                   # Terminal 1 → :8080
+cd dashboard && npm install && npm run dev      # Terminal 2 → :3000
 ```
 
-The dashboard exposes all CLI operations through a browser UI:
+It exposes storage stats, template search with hit counts, per-slot inspection, pattern query with "did you mean?" suggestions, anomalies, relative/absolute replay, browser ingest, and compaction — all over the same API the MCP server uses.
 
-- **Dashboard** — storage stats and inline query with pattern search, slot filters, and "did you mean?" suggestions
-- **Templates** — searchable table with hit counts and last-seen timestamps; click any row to inspect
-- **Inspect** — per-slot parameter stats (top values, distinct count) and reconstructed recent log lines
-- **Replay** — relative window (last 1h, 1d…) or absolute range with a calendar and clock picker
-- **Ingest** — paste log content directly into the browser
-- **Settings** — compact database to Parquet or clear all data, both with confirmation dialogs
-
-The server reads only the compacted Parquet snapshot in `logs_data/`, so `logslim serve` can run concurrently with `logslim run` / `logslim consume` (the writer owns `logs.duckdb`). On first startup the server auto-bootstraps an empty Parquet snapshot if one doesn't exist yet — no manual `logslim compact` step needed. The dashboard sees new data after each subsequent compact.
+The server reads only the compacted Parquet snapshot in `logs_data/`, so `logslim serve` can run concurrently with `logslim run` / `logslim consume` (the writer owns `logs.duckdb`). It auto-bootstraps an empty snapshot on first startup and sees new data after each `compact`.
 
 ---
-## Benchmarks
 
-Real-world numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3).
-Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.md`.
+## Compression — the enabling mechanism
 
-### Compression (100,000 synthetic log lines, 10 templates, ~7 MB raw)
+The same template/parameter separation that makes logs cheap to feed an agent also makes them cheap to store. Real numbers from a single Apple Silicon laptop (Java 17, DuckDB 1.1.3); reproducible via `benchmarks/run_all.sh`.
+
+### 100,000 synthetic log lines, 10 templates, ~7 MB raw
 
 | Stage | Size |
 |---|---|
@@ -218,47 +201,38 @@ Reproducible end-to-end via `benchmarks/run_all.sh` — see `benchmarks/README.m
 | After `compact` (`.duckdb` + Parquet) | **1.71 MB** |
 | Reduction vs source | **76.5%** |
 
-Compression improves with log repetition. Files with fewer distinct templates compress 
-further because DuckDB's dictionary encoding on `template_id` becomes even more efficient. 
-
+Compression improves with log repetition — fewer distinct templates compress further as DuckDB's dictionary encoding on `template_id` gets more efficient.
 
 | Log file | Original | After compact | Reduction |
 |----------|----------|---------------|-----------|
 | `app_logs.log` (100k lines) | 7.35 MB | 1.49 MB | 80% |
 | `app.log` (100k lines) | 9.10 MB | 1.71 MB | 81% |
 
-
 ---
 
 ## Key Properties
 
-**Lossless** — every log line is exactly reconstructable. Multi-line entries (stack traces, `Caused by:` chains) are stored and replayed intact.
+**Structure-first** — logs become templates + parameters + distributions, queryable as data and consumable by agents as a few thousand tokens instead of millions of raw lines.
 
-**Zero configuration** — no regex patterns to write. The Drain algorithm learns dynamic token positions from the data itself.
+**Lossless** — every line is exactly reconstructable. Multi-line entries (stack traces, `Caused by:` chains) are stored and replayed intact.
 
-**Queryable after compression** — `logslim compact` replaces tables with DuckDB views over Parquet files. All query commands work without decompressing anything.
+**Zero configuration** — no regex patterns. Drain learns dynamic token positions from the data itself.
 
-**Transparent** — LogSlim is a preprocessing layer. Feed it logs, query them back. No changes to your application or log format required.
+**Queryable after compression** — `compact` replaces tables with DuckDB views over Parquet. All query commands work without decompressing anything.
+
+**Transparent** — a preprocessing layer. Feed it logs, query them back. No changes to your application or log format.
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. Before submitting:
+Pull requests welcome. Before submitting:
 
 ```bash
 mvn clean test   # all tests must pass
 ```
 
-The test suite covers:
-- Drain algorithm correctness (lock transitions, novel token discovery, bootstrap)
-- End-to-end pipeline with 10k synthetic logs across 5 templates
-- Lossless reconstruction including multi-line entries
-- Parameter filtering and temporal ordering
-
-If you're adding a new feature, add integration tests in `src/test/java/com/logslim/integration/` that verify the invariants that matter most: **losslessness**, **correct grouping**, and **temporal order**.
-
-Open an issue first for large changes so we can discuss the approach before you invest the time.
+The suite covers Drain correctness (lock transitions, novel-token discovery, bootstrap), the end-to-end pipeline, lossless reconstruction including multi-line entries, parameter filtering, and temporal ordering. For new features, add integration tests in `src/test/java/com/logslim/integration/` that verify the invariants that matter most: **losslessness**, **correct grouping**, and **temporal order**. Open an issue first for large changes.
 
 ---
 
