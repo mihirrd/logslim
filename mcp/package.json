@@ -1,7 +1,7 @@
 {
   "name": "logslim-mcp",
   "version": "0.1.0",
-  "description": "MCP server exposing LogSlim's structured logs to AI agents — templates, anomalies, and exact replay instead of raw log dumps.",
+  "description": "MCP server exposing LogSlim's structured logs to AI agents — templates, counts, slot distributions, and exact replay instead of raw log dumps.",
   "type": "module",
   "bin": {
     "logslim-mcp": "dist/index.js"
@@ -13,13 +13,33 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "prepare": "tsc",
+    "pretest": "tsc",
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "logs",
+    "observability",
+    "logslim",
+    "ai-agents"
+  ],
+  "author": "Mihir Deshpande",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mihirrd/logslim.git",
+    "directory": "mcp"
+  },
+  "homepage": "https://github.com/mihirrd/logslim/tree/main/mcp#readme",
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

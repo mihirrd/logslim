@@ -26,9 +26,16 @@ logslim serve   # → LogSlim API server running on http://localhost:8080
 
 ```bash
 cd mcp
-npm install
-npm run build
+npm install        # builds dist/ automatically via the `prepare` script
 ```
+
+(`npm run build` is also available; `npm ci` honors the committed lockfile and builds the
+same way.)
+
+The package is publish-ready (`npm pack` ships only `dist/` + this README; `prepublishOnly`
+runs the test suite). It is not published to npm yet — run it from source as above. Once
+published, `npx logslim-mcp` would work via the declared `bin`. The server speaks MCP over
+**stdio**, so it runs locally alongside your agent; a remote/HTTP transport is future work.
 
 ## Configure your agent
 
@@ -84,6 +91,17 @@ The server also exposes an `investigate_incident` **prompt** that scaffolds the 
 detect → localize → drill → replay workflow, and server-level `instructions` that steer
 the agent to start with structure and treat `replay` as a last resort — which is what
 keeps token usage low.
+
+## Tests
+
+```bash
+npm test
+```
+
+No external services or network required — `node:test` (built in) drives:
+
+- **unit** — `buildUrl` query assembly and the `cap()` truncation wrapper (`test/lib.test.mjs`);
+- **integration** — the compiled server spawned over real stdio JSON-RPC against an in-process mock LogSlim API (`test/server.test.mjs`): the tool list, that `query_logs` defaults to structured and clamps its limit, `format:'lines'` routing, `template_counts baseline:true` forwarding, `replay` truncation, and that an unreachable API surfaces as an `isError` result rather than a crash. The mock records requests, so it doubles as a contract guard against API drift.
 
 ## Smoke test (no agent needed)
 
