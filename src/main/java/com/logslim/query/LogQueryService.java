@@ -13,6 +13,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -39,12 +41,22 @@ public class LogQueryService {
      * Returns reconstructed original log lines, in timestamp order.
      */
     public List<String> queryByPattern(String pattern, Map<String, String> filters, Duration window) {
+        return queryByPattern(pattern, filters, window, Integer.MAX_VALUE);
+    }
+
+    public List<String> queryByPattern(String pattern, Map<String, String> filters, Duration window, int limit) {
         Instant to   = Instant.now();
         Instant from = window != null ? to.minus(window) : Instant.EPOCH;
-        return queryByPattern(pattern, filters, from, to);
+        return queryByPattern(pattern, filters, from, to, limit);
     }
 
     public List<String> queryByPattern(String pattern, Map<String, String> filters, Instant from, Instant to) {
+        return queryByPattern(pattern, filters, from, to, Integer.MAX_VALUE);
+    }
+
+    public List<String> queryByPattern(String pattern, Map<String, String> filters,
+                                       Instant from, Instant to, int limit) {
+        if (limit <= 0) return List.of();
         Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
         if (templateOpt.isEmpty()) return List.of();
 
@@ -60,6 +72,12 @@ public class LogQueryService {
                     .collect(Collectors.toList());
         }
 
+        // Bound the result set before reconstruction — an unbounded query on a
+        // high-frequency template can otherwise return tens of thousands of lines.
+        if (entries.size() > limit) {
+            entries = entries.subList(0, limit);
+        }
+
         List<String> lines = new ArrayList<>(entries.size());
         for (LogEntry e : entries) {
             try {
@@ -71,6 +89,77 @@ public class LogQueryService {
         }
         return lines;
     }
+
+    private static final Pattern SLOT_TOKEN = Pattern.compile("\\{([^}]*)\\}");
+
+    /** Slot names in pattern order, including slots embedded inside a token (e.g. {id} in /users/{id}). */
+    private static List<String> extractSlotNames(String pattern) {
+        List<String> names = new ArrayList<>();
+        Matcher m = SLOT_TOKEN.matcher(pattern);
+        while (m.find()) names.add(m.group(1));
+        return names;
+    }
+
+    /**
+     * Structured query: matches occurrences of a template the same way as
+     * {@link #queryByPattern}, but instead of reconstructing each full line it
+     * returns the template ONCE plus the per-occurrence parameter tuples. The
+     * static skeleton of the line is stated a single time rather than repeated
+     * per row — this is the token-efficient representation an agent should consume.
+     *
+     * @param selectSlots if non-empty, project to only these slot names (columnar)
+     */
+    public StructuredQueryResult queryStructured(String pattern, Map<String, String> filters,
+                                                 Instant from, Instant to, int limit,
+                                                 List<String> selectSlots) {
+        Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
+        if (templateOpt.isEmpty()) {
+            return new StructuredQueryResult(-1, null, List.of(), 0, List.of());
+        }
+        Template template = templateOpt.get();
+
+        List<LogEntry> entries = logEntryDao.findByTimeRange(from, to).stream()
+                .filter(e -> e.getTemplateId() == template.getId())
+                .collect(Collectors.toList());
+        if (!filters.isEmpty()) {
+            final Template tmpl = template;
+            entries = entries.stream()
+                    .filter(e -> matchesFilters(tmpl, e, filters))
+                    .collect(Collectors.toList());
+        }
+        long matched = entries.size();
+
+        List<String> slotNames = extractSlotNames(template.getPattern());
+
+        // Optional projection: keep only the requested slot indices.
+        List<Integer> keep = null;
+        if (selectSlots != null && !selectSlots.isEmpty()) {
+            keep = new ArrayList<>();
+            for (int i = 0; i < slotNames.size(); i++) {
+                if (selectSlots.contains(slotNames.get(i))) keep.add(i);
+            }
+        }
+        List<String> outSlots = keep == null ? slotNames
+                : keep.stream().map(slotNames::get).collect(Collectors.toList());
+
+        int cap = Math.max(0, limit);
+        List<List<String>> occurrences = new ArrayList<>(Math.min(cap, entries.size()));
+        for (int i = 0; i < entries.size() && occurrences.size() < cap; i++) {
+            List<String> pv = entries.get(i).getParameterValues();
+            if (keep == null) {
+                occurrences.add(pv);
+            } else {
+                List<String> row = new ArrayList<>(keep.size());
+                for (int j : keep) row.add(j < pv.size() ? pv.get(j) : null);
+                occurrences.add(row);
+            }
+        }
+        return new StructuredQueryResult(template.getId(), template.getPattern(),
+                outSlots, matched, occurrences);
+    }
+
+    public record StructuredQueryResult(long templateId, String template, List<String> slots,
+                                        long matchedCount, List<List<String>> occurrences) {}
 
     public List<String> replayLogs(Duration window) {
         return replayLogs(window, Integer.MAX_VALUE);

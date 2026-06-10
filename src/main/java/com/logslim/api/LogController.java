@@ -32,7 +32,28 @@ public class LogController {
     public List<String> query(@RequestBody QueryRequest req) {
         Duration window = req.last() != null ? parseDuration(req.last()) : null;
         Map<String, String> filters = req.filters() != null ? req.filters() : Map.of();
-        return queryService.queryByPattern(req.pattern(), filters, window);
+        int limit = req.limit() != null ? Math.max(1, Math.min(req.limit(), 5000)) : 500;
+        return queryService.queryByPattern(req.pattern(), filters, window, limit);
+    }
+
+    @PostMapping("/query-structured")
+    public Map<String, Object> queryStructured(@RequestBody StructuredQueryRequest req) {
+        Duration window = req.last() != null ? parseDuration(req.last()) : null;
+        Map<String, String> filters = req.filters() != null ? req.filters() : Map.of();
+        int limit = req.limit() != null ? Math.max(1, Math.min(req.limit(), 5000)) : 500;
+        Instant to   = Instant.now();
+        Instant from = window != null ? to.minus(window) : Instant.EPOCH;
+
+        var result = queryService.queryStructured(
+                req.pattern(), filters, from, to, limit, req.slots());
+
+        return Map.of(
+                "templateId",   result.templateId(),
+                "template",     result.template() != null ? result.template() : "",
+                "slots",        result.slots(),
+                "matchedCount", result.matchedCount(),
+                "returned",     result.occurrences().size(),
+                "occurrences",  result.occurrences());
     }
 
     @GetMapping("/replay")
@@ -104,5 +125,8 @@ public class LogController {
         return Duration.ofHours(1);
     }
 
-    record QueryRequest(String pattern, Map<String, String> filters, String last) {}
+    record QueryRequest(String pattern, Map<String, String> filters, String last, Integer limit) {}
+
+    record StructuredQueryRequest(String pattern, Map<String, String> filters, String last,
+                                  Integer limit, List<String> slots) {}
 }
