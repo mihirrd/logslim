@@ -14,12 +14,13 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import { buildUrl, cap, type Json } from "./lib.js";
 
 const API_URL = (process.env.LOGSLIM_API_URL ?? "http://localhost:8080").replace(/\/+$/, "");
 const API_KEY = process.env.LOGSLIM_API_KEY;
-
-type Json = unknown;
 
 /** Single point for HTTP calls to the LogSlim API. */
 async function api(
@@ -27,10 +28,7 @@ async function api(
   path: string,
   opts: { query?: Record<string, string | number | undefined>; body?: Json } = {},
 ): Promise<Json> {
-  const url = new URL(API_URL + path);
-  for (const [k, v] of Object.entries(opts.query ?? {})) {
-    if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
-  }
+  const url = buildUrl(API_URL, path, opts.query ?? {});
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -47,25 +45,6 @@ async function api(
     throw new Error(`LogSlim API ${method} ${path} -> ${res.status} ${res.statusText}${text ? `: ${text.slice(0, 500)}` : ""}`);
   }
   return res.json();
-}
-
-/**
- * Truncate an array response to protect the agent's context budget. When the
- * underlying list exceeds `max`, return a wrapper that makes the truncation
- * explicit — so the agent knows the result is partial and should narrow its
- * window/filter rather than assume it saw everything. Non-arrays pass through.
- */
-function cap(data: Json, max: number, hint: string): Json {
-  if (Array.isArray(data) && data.length > max) {
-    return {
-      truncated: true,
-      returned: max,
-      totalAvailable: data.length,
-      hint,
-      items: data.slice(0, max),
-    };
-  }
-  return data;
 }
 
 /** Wrap a tool body so API/network errors come back as a clean MCP error result. */
@@ -443,7 +422,26 @@ async function main() {
   console.error(`logslim-mcp connected (API: ${API_URL}${API_KEY ? ", auth on" : ""})`);
 }
 
-main().catch((err) => {
-  console.error("logslim-mcp fatal:", err);
-  process.exit(1);
-});
+/**
+ * True when this module is the process entrypoint. Compares realpaths so a symlinked `bin`
+ * (e.g. `npx logslim-mcp`) still matches — ESM resolves `import.meta.url` to the real file,
+ * while `process.argv[1]` is the symlink as invoked.
+ */
+function isEntrypoint(): boolean {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+// Only connect stdio when run as the entrypoint (so importing this module for
+// tests/tooling has no side effects).
+if (isEntrypoint()) {
+  main().catch((err) => {
+    console.error("logslim-mcp fatal:", err);
+    process.exit(1);
+  });
+}
