@@ -95,21 +95,87 @@ public class LogEntryDao {
     }
 
     public List<Map.Entry<String, Long>> getTopValuesForSlot(long templateId, int slotIndex, int topN) {
+        return getTopValuesForSlot(templateId, slotIndex, topN, null, null);
+    }
+
+    public List<Map.Entry<String, Long>> getTopValuesForSlot(long templateId, int slotIndex, int topN,
+                                                             Instant from, Instant to) {
         String sql = ("SELECT json_extract_string(parameter_values, '$[%d]') AS v, COUNT(*) AS c " +
-                      "FROM log_entries WHERE template_id = :tid " +
-                      "AND json_extract_string(parameter_values, '$[%d]') IS NOT NULL " +
+                      "FROM log_entries WHERE template_id = :tid" + timeClause(from, to) +
+                      " AND json_extract_string(parameter_values, '$[%d]') IS NOT NULL " +
                       "GROUP BY v ORDER BY c DESC LIMIT :topN").formatted(slotIndex, slotIndex);
-        return jdbc.query(sql,
-                new MapSqlParameterSource().addValue("tid", templateId).addValue("topN", topN),
+        MapSqlParameterSource p = new MapSqlParameterSource()
+                .addValue("tid", templateId).addValue("topN", topN);
+        addRange(p, from, to);
+        return jdbc.query(sql, p,
                 (rs, i) -> new AbstractMap.SimpleEntry<>(rs.getString("v"), rs.getLong("c")));
     }
 
+    /** Numeric aggregate for a slot, scoped to a window, with a detected unit. */
+    public record NumericAggregate(long count, double min, double max,
+                                   double avg, double p50, double p95, String unit) {}
+
+    public NumericAggregate numericSummaryForSlot(long templateId, int slotIndex) {
+        return numericSummaryForSlot(templateId, slotIndex, null, null);
+    }
+
+    /**
+     * Numeric aggregate for a slot, or {@code null} if its values aren't numeric.
+     * Strips a leading {@code key=} and a trailing unit ({@code ms}, {@code s}, {@code %}, …)
+     * before casting, so {@code duration=16ms} → 16 while {@code user=usr_00337} stays
+     * non-numeric (won't be counted). Returns {@code null} when the values mix more than
+     * one unit (an avg across {@code ms} and {@code s} would be meaningless); otherwise the
+     * detected unit (or {@code null} for unitless numbers) rides along in the result.
+     */
+    public NumericAggregate numericSummaryForSlot(long templateId, int slotIndex, Instant from, Instant to) {
+        String valExpr  = ("regexp_replace(json_extract_string(parameter_values, '$[%d]'), '^.*=', '')")
+                .formatted(slotIndex);
+        String numExpr  = "TRY_CAST(regexp_replace(" + valExpr + ", '[a-zA-Z%]+$', '') AS DOUBLE)";
+        String unitExpr = "regexp_extract(" + valExpr + ", '([a-zA-Z%]+)$', 1)";
+        String sql = "SELECT COUNT(num) AS n, MIN(num) AS mn, MAX(num) AS mx, AVG(num) AS av, " +
+                "quantile_cont(num, 0.5) AS p50, quantile_cont(num, 0.95) AS p95, " +
+                "COUNT(DISTINCT NULLIF(unit, '')) AS units, MAX(unit) AS unit " +
+                "FROM (SELECT " + numExpr + " AS num, " + unitExpr + " AS unit " +
+                "FROM log_entries WHERE template_id = :tid" + timeClause(from, to) + ") t " +
+                "WHERE num IS NOT NULL";
+        MapSqlParameterSource p = new MapSqlParameterSource().addValue("tid", templateId);
+        addRange(p, from, to);
+        return jdbc.query(sql, p,
+                (org.springframework.jdbc.core.ResultSetExtractor<NumericAggregate>) rs -> {
+                    if (!rs.next()) return null;
+                    long n = rs.getLong("n");
+                    if (n == 0) return null;
+                    if (rs.getLong("units") > 1) return null; // mixed units → skip
+                    String unit = rs.getString("unit");
+                    if (unit != null && unit.isEmpty()) unit = null;
+                    return new NumericAggregate(n, rs.getDouble("mn"), rs.getDouble("mx"),
+                            rs.getDouble("av"), rs.getDouble("p50"), rs.getDouble("p95"), unit);
+                });
+    }
+
     public long countDistinctForSlot(long templateId, int slotIndex) {
+        return countDistinctForSlot(templateId, slotIndex, null, null);
+    }
+
+    public long countDistinctForSlot(long templateId, int slotIndex, Instant from, Instant to) {
         String sql = ("SELECT COUNT(DISTINCT json_extract_string(parameter_values, '$[%d]')) " +
-                      "FROM log_entries WHERE template_id = :tid").formatted(slotIndex);
-        Long n = jdbc.queryForObject(sql,
-                new MapSqlParameterSource().addValue("tid", templateId), Long.class);
+                      "FROM log_entries WHERE template_id = :tid" + timeClause(from, to)).formatted(slotIndex);
+        MapSqlParameterSource p = new MapSqlParameterSource().addValue("tid", templateId);
+        addRange(p, from, to);
+        Long n = jdbc.queryForObject(sql, p, Long.class);
         return n == null ? 0 : n;
+    }
+
+    /** Optional {@code log_timestamp BETWEEN} clause — emitted only when both bounds are set. */
+    private static String timeClause(Instant from, Instant to) {
+        return (from != null && to != null)
+                ? " AND log_timestamp >= :from AND log_timestamp <= :to" : "";
+    }
+
+    private static void addRange(MapSqlParameterSource p, Instant from, Instant to) {
+        if (from != null && to != null) {
+            p.addValue("from", from.toEpochMilli()).addValue("to", to.toEpochMilli());
+        }
     }
 
     public Map<Long, Long> countByTemplateInRange(Instant from, Instant to) {
@@ -127,6 +193,25 @@ public class LogEntryDao {
         return result;
     }
 
+    /**
+     * Earliest log-event timestamp seen for each template, across all history.
+     * Keyed by template id, value is epoch millis. Used to detect templates whose
+     * very first occurrence falls inside an investigation window (event-time based,
+     * independent of when the row was ingested).
+     */
+    public Map<Long, Long> firstSeenByTemplate() {
+        String sql = """
+                SELECT template_id, MIN(log_timestamp) AS first_seen
+                FROM log_entries
+                GROUP BY template_id
+                """;
+        Map<Long, Long> result = new java.util.HashMap<>();
+        jdbc.query(sql, Map.of(),
+                (org.springframework.jdbc.core.RowCallbackHandler)
+                rs -> result.put(rs.getLong("template_id"), rs.getLong("first_seen")));
+        return result;
+    }
+
     public List<LogEntry> findByTemplateIdAndTimeRange(long templateId, Instant from, Instant to) {
         String sql = """
                 SELECT * FROM log_entries
@@ -140,6 +225,44 @@ public class LogEntryDao {
                         .addValue("from", from.toEpochMilli())
                         .addValue("to",   to.toEpochMilli()),
                 ROW_MAPPER);
+    }
+
+    /**
+     * Limited variant: pushes the template-id filter, the time range, the ordering AND
+     * the row cap into SQL so a query never materialises more than {@code limit} rows —
+     * even for an EPOCH..now window on a high-frequency template.
+     */
+    public List<LogEntry> findByTemplateIdAndTimeRange(long templateId, Instant from, Instant to, int limit) {
+        String sql = """
+                SELECT * FROM log_entries
+                WHERE template_id = :tid
+                AND log_timestamp >= :from AND log_timestamp <= :to
+                ORDER BY log_timestamp ASC, entry_id ASC
+                LIMIT :limit
+                """;
+        return jdbc.query(sql,
+                new MapSqlParameterSource()
+                        .addValue("tid",   templateId)
+                        .addValue("from",  from.toEpochMilli())
+                        .addValue("to",    to.toEpochMilli())
+                        .addValue("limit", limit),
+                ROW_MAPPER);
+    }
+
+    /** Total occurrences of a template in a window, computed in SQL (for an accurate matchedCount). */
+    public long countByTemplateIdAndTimeRange(long templateId, Instant from, Instant to) {
+        String sql = """
+                SELECT COUNT(*) FROM log_entries
+                WHERE template_id = :tid
+                AND log_timestamp >= :from AND log_timestamp <= :to
+                """;
+        Long n = jdbc.queryForObject(sql,
+                new MapSqlParameterSource()
+                        .addValue("tid",  templateId)
+                        .addValue("from", from.toEpochMilli())
+                        .addValue("to",   to.toEpochMilli()),
+                Long.class);
+        return n == null ? 0 : n;
     }
 
     private MapSqlParameterSource entryToParams(LogEntry entry) {

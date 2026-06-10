@@ -18,6 +18,14 @@ import java.util.stream.Collectors;
 @Service
 public class LogQueryService {
 
+    /**
+     * When slot-value filters are present they can't be pushed to SQL, so we over-fetch
+     * up to this internal ceiling and filter in Java. Bounds memory while still letting a
+     * filtered query find matches beyond the requested {@code limit}; matches past the
+     * ceiling within the window won't be seen.
+     */
+    private static final int FILTER_SCAN_CAP = 50_000;
+
     private final TemplateDao templateDao;
     private final LogEntryDao logEntryDao;
     private final RawLogDao rawLogDao;
@@ -39,25 +47,46 @@ public class LogQueryService {
      * Returns reconstructed original log lines, in timestamp order.
      */
     public List<String> queryByPattern(String pattern, Map<String, String> filters, Duration window) {
+        return queryByPattern(pattern, filters, window, Integer.MAX_VALUE);
+    }
+
+    public List<String> queryByPattern(String pattern, Map<String, String> filters, Duration window, int limit) {
         Instant to   = Instant.now();
         Instant from = window != null ? to.minus(window) : Instant.EPOCH;
-        return queryByPattern(pattern, filters, from, to);
+        return queryByPattern(pattern, filters, from, to, limit);
     }
 
     public List<String> queryByPattern(String pattern, Map<String, String> filters, Instant from, Instant to) {
+        return queryByPattern(pattern, filters, from, to, Integer.MAX_VALUE);
+    }
+
+    public List<String> queryByPattern(String pattern, Map<String, String> filters,
+                                       Instant from, Instant to, int limit) {
+        if (limit <= 0) return List.of();
         Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
         if (templateOpt.isEmpty()) return List.of();
 
         Template template = templateOpt.get();
-        List<LogEntry> entries = logEntryDao.findByTimeRange(from, to).stream()
-                .filter(e -> e.getTemplateId() == template.getId())
-                .collect(Collectors.toList());
 
-        if (!filters.isEmpty()) {
+        // Push template_id + time range + LIMIT into SQL so we never materialise the whole
+        // window. With filters (which can't be pushed to SQL) we over-fetch to a bounded cap
+        // and filter in Java.
+        boolean hasFilters = !filters.isEmpty();
+        int fetchLimit = hasFilters ? Math.max(limit, FILTER_SCAN_CAP) : limit;
+        List<LogEntry> entries = logEntryDao.findByTemplateIdAndTimeRange(
+                template.getId(), from, to, fetchLimit);
+
+        if (hasFilters) {
             final Template tmpl = template;
             entries = entries.stream()
                     .filter(e -> matchesFilters(tmpl, e, filters))
                     .collect(Collectors.toList());
+        }
+
+        // Bound the result set before reconstruction — a filtered over-fetch may still
+        // exceed the requested limit.
+        if (entries.size() > limit) {
+            entries = entries.subList(0, limit);
         }
 
         List<String> lines = new ArrayList<>(entries.size());
@@ -71,6 +100,87 @@ public class LogQueryService {
         }
         return lines;
     }
+
+    /**
+     * Structured query: matches occurrences of a template the same way as
+     * {@link #queryByPattern}, but instead of reconstructing each full line it
+     * returns the template ONCE plus the per-occurrence parameter tuples. The
+     * static skeleton of the line is stated a single time rather than repeated
+     * per row — this is the token-efficient representation an agent should consume.
+     *
+     * @param selectSlots if non-empty, project to only these slot names (columnar)
+     */
+    public StructuredQueryResult queryStructured(String pattern, Map<String, String> filters,
+                                                 Instant from, Instant to, int limit,
+                                                 List<String> selectSlots) {
+        Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
+        if (templateOpt.isEmpty()) {
+            return new StructuredQueryResult(-1, null, List.of(), 0, false, List.of());
+        }
+        Template template = templateOpt.get();
+
+        // Push template_id + time range + LIMIT into SQL (see queryByPattern). matchedCount
+        // is the true window total via a COUNT(*) query — never entries.size() after limiting.
+        boolean hasFilters = !filters.isEmpty();
+        int cap = Math.max(0, limit);
+        int fetchLimit = hasFilters ? Math.max(cap, FILTER_SCAN_CAP) : cap;
+        List<LogEntry> entries = logEntryDao.findByTemplateIdAndTimeRange(
+                template.getId(), from, to, fetchLimit);
+        int rawFetched = entries.size();
+
+        long matched;
+        boolean scanCapped = false;
+        if (hasFilters) {
+            final Template tmpl = template;
+            entries = entries.stream()
+                    .filter(e -> matchesFilters(tmpl, e, filters))
+                    .collect(Collectors.toList());
+            // Filters can't be pushed to SQL: matchedCount counts matches within the scanned
+            // window only. If the pre-filter fetch hit the cap, matches past it are invisible —
+            // flag it so the count isn't trusted as exact.
+            matched = entries.size();
+            scanCapped = rawFetched >= fetchLimit;
+        } else {
+            matched = logEntryDao.countByTemplateIdAndTimeRange(template.getId(), from, to);
+        }
+
+        // Canonical, de-duplicated slot names — the same keys callers filter/project on.
+        List<String> slotNames = normalizer.slotNames(template.getPattern());
+
+        // Optional projection: keep only the requested slot indices.
+        List<Integer> keep = null;
+        if (selectSlots != null && !selectSlots.isEmpty()) {
+            keep = new ArrayList<>();
+            for (int i = 0; i < slotNames.size(); i++) {
+                if (selectSlots.contains(slotNames.get(i))) keep.add(i);
+            }
+        }
+        List<String> outSlots = keep == null ? slotNames
+                : keep.stream().map(slotNames::get).collect(Collectors.toList());
+
+        // Emit values with the redundant `key=` mask stripped (the key is the column name).
+        // Read-side only — stored values are untouched so reconstruction stays byte-exact.
+        List<List<String>> occurrences = new ArrayList<>(Math.min(cap, entries.size()));
+        for (int i = 0; i < entries.size() && occurrences.size() < cap; i++) {
+            List<String> pv = entries.get(i).getParameterValues();
+            List<Integer> idx = keep != null ? keep : null;
+            int n = idx != null ? idx.size() : pv.size();
+            List<String> row = new ArrayList<>(n);
+            for (int k = 0; k < n; k++) {
+                int j = idx != null ? idx.get(k) : k;
+                String v = j < pv.size() ? pv.get(j) : null;
+                String name = j < slotNames.size() ? slotNames.get(j) : null;
+                row.add(TemplateNormalizer.stripKeyPrefix(v, name));
+            }
+            occurrences.add(row);
+        }
+        return new StructuredQueryResult(template.getId(), template.getPattern(),
+                outSlots, matched, scanCapped, occurrences);
+    }
+
+    public record StructuredQueryResult(long templateId, String template, List<String> slots,
+                                        long matchedCount, boolean scanCapped,
+                                        List<List<String>> occurrences) {}
 
     public List<String> replayLogs(Duration window) {
         return replayLogs(window, Integer.MAX_VALUE);
@@ -164,8 +274,15 @@ public class LogQueryService {
     private boolean matchesFilters(Template template, LogEntry entry, Map<String, String> filters) {
         Map<String, String> paramMap = normalizer.buildParameterMap(
                 template.getPattern(), entry.getParameterValues());
-        return filters.entrySet().stream()
-                .allMatch(f -> f.getValue().equals(paramMap.get(f.getKey())));
+        return filters.entrySet().stream().allMatch(f -> {
+            String raw = paramMap.get(f.getKey());
+            if (raw == null) return false;
+            // Accept either the raw stored value (e.g. "user=usr_1") or the stripped
+            // display value (e.g. "usr_1") — the latter is what query/inspect surface,
+            // so an agent can filter by exactly the value it just saw.
+            return f.getValue().equals(raw)
+                || f.getValue().equals(TemplateNormalizer.stripKeyPrefix(raw, f.getKey()));
+        });
     }
 
     /**
