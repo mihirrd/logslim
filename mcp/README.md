@@ -64,15 +64,16 @@ claude mcp add logslim -- node /absolute/path/to/logslim/mcp/dist/index.js
 ## Tools
 
 The tools are **atomic primitives the agent composes** — there is no single "answer"
-call. Spike detection, for example, is the agent calling `template_counts` for the
-window and again for a prior baseline, then diffing.
+call. Spike detection, for example, is `template_counts` with `baseline: true`: the
+server compares the window against the equal-length window just before it and returns
+windowCount + baselineCount + ratio per template in one call (no hand-diffing).
 
 | Tool | Cost | Use when | Role |
 |------|------|----------|------|
 | `list_templates` | low | The whole service's behavior as patterns + counts; search by text. | orient |
 | `get_stats` | low | Store sizes (template / entry / raw counts). | orient |
-| `template_counts` | low | Per-template counts in a window; call twice (window + baseline) and diff to find spikes. | detect |
-| `new_templates` | low | Templates first seen (by event time) in a window — prime root-cause candidates. | detect |
+| `template_counts` | low | Per-template counts in a window; set `baseline: true` for server-side window-vs-baseline ratios to find spikes. | detect |
+| `new_templates` | low | Templates first seen (by event time) in a window — prime root-cause candidates. **Caveat:** "new" means new to the *ingested dataset*, not the running service, so it only signals true novelty when pre-incident baseline data is also ingested. | detect |
 | `template_timeseries` | low | Bucketed counts for one template; pinpoint the onset minute. | localize |
 | `inspect_template` | low | Per-slot **distributions + numeric summaries** (min/max/avg/p50/p95), no rows pulled. Use for "which / how many / what distribution" **before** `query_logs`. | drill |
 | `query_logs` | low–med | Occurrences of a pattern, filtered by slot value. Returns **structure** (template once + param tuples), not reconstructed lines; `slots` projects to specific columns. | drill |

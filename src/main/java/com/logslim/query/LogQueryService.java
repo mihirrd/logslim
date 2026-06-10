@@ -13,12 +13,18 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
 public class LogQueryService {
+
+    /**
+     * When slot-value filters are present they can't be pushed to SQL, so we over-fetch
+     * up to this internal ceiling and filter in Java. Bounds memory while still letting a
+     * filtered query find matches beyond the requested {@code limit}; matches past the
+     * ceiling within the window won't be seen.
+     */
+    private static final int FILTER_SCAN_CAP = 50_000;
 
     private final TemplateDao templateDao;
     private final LogEntryDao logEntryDao;
@@ -61,19 +67,24 @@ public class LogQueryService {
         if (templateOpt.isEmpty()) return List.of();
 
         Template template = templateOpt.get();
-        List<LogEntry> entries = logEntryDao.findByTimeRange(from, to).stream()
-                .filter(e -> e.getTemplateId() == template.getId())
-                .collect(Collectors.toList());
 
-        if (!filters.isEmpty()) {
+        // Push template_id + time range + LIMIT into SQL so we never materialise the whole
+        // window. With filters (which can't be pushed to SQL) we over-fetch to a bounded cap
+        // and filter in Java.
+        boolean hasFilters = !filters.isEmpty();
+        int fetchLimit = hasFilters ? Math.max(limit, FILTER_SCAN_CAP) : limit;
+        List<LogEntry> entries = logEntryDao.findByTemplateIdAndTimeRange(
+                template.getId(), from, to, fetchLimit);
+
+        if (hasFilters) {
             final Template tmpl = template;
             entries = entries.stream()
                     .filter(e -> matchesFilters(tmpl, e, filters))
                     .collect(Collectors.toList());
         }
 
-        // Bound the result set before reconstruction — an unbounded query on a
-        // high-frequency template can otherwise return tens of thousands of lines.
+        // Bound the result set before reconstruction — a filtered over-fetch may still
+        // exceed the requested limit.
         if (entries.size() > limit) {
             entries = entries.subList(0, limit);
         }
@@ -90,16 +101,6 @@ public class LogQueryService {
         return lines;
     }
 
-    private static final Pattern SLOT_TOKEN = Pattern.compile("\\{([^}]*)\\}");
-
-    /** Slot names in pattern order, including slots embedded inside a token (e.g. {id} in /users/{id}). */
-    private static List<String> extractSlotNames(String pattern) {
-        List<String> names = new ArrayList<>();
-        Matcher m = SLOT_TOKEN.matcher(pattern);
-        while (m.find()) names.add(m.group(1));
-        return names;
-    }
-
     /**
      * Structured query: matches occurrences of a template the same way as
      * {@link #queryByPattern}, but instead of reconstructing each full line it
@@ -114,22 +115,37 @@ public class LogQueryService {
                                                  List<String> selectSlots) {
         Optional<Template> templateOpt = templateDao.findByPattern(normalizePatternInput(pattern));
         if (templateOpt.isEmpty()) {
-            return new StructuredQueryResult(-1, null, List.of(), 0, List.of());
+            return new StructuredQueryResult(-1, null, List.of(), 0, false, List.of());
         }
         Template template = templateOpt.get();
 
-        List<LogEntry> entries = logEntryDao.findByTimeRange(from, to).stream()
-                .filter(e -> e.getTemplateId() == template.getId())
-                .collect(Collectors.toList());
-        if (!filters.isEmpty()) {
+        // Push template_id + time range + LIMIT into SQL (see queryByPattern). matchedCount
+        // is the true window total via a COUNT(*) query — never entries.size() after limiting.
+        boolean hasFilters = !filters.isEmpty();
+        int cap = Math.max(0, limit);
+        int fetchLimit = hasFilters ? Math.max(cap, FILTER_SCAN_CAP) : cap;
+        List<LogEntry> entries = logEntryDao.findByTemplateIdAndTimeRange(
+                template.getId(), from, to, fetchLimit);
+        int rawFetched = entries.size();
+
+        long matched;
+        boolean scanCapped = false;
+        if (hasFilters) {
             final Template tmpl = template;
             entries = entries.stream()
                     .filter(e -> matchesFilters(tmpl, e, filters))
                     .collect(Collectors.toList());
+            // Filters can't be pushed to SQL: matchedCount counts matches within the scanned
+            // window only. If the pre-filter fetch hit the cap, matches past it are invisible —
+            // flag it so the count isn't trusted as exact.
+            matched = entries.size();
+            scanCapped = rawFetched >= fetchLimit;
+        } else {
+            matched = logEntryDao.countByTemplateIdAndTimeRange(template.getId(), from, to);
         }
-        long matched = entries.size();
 
-        List<String> slotNames = extractSlotNames(template.getPattern());
+        // Canonical, de-duplicated slot names — the same keys callers filter/project on.
+        List<String> slotNames = normalizer.slotNames(template.getPattern());
 
         // Optional projection: keep only the requested slot indices.
         List<Integer> keep = null;
@@ -142,24 +158,29 @@ public class LogQueryService {
         List<String> outSlots = keep == null ? slotNames
                 : keep.stream().map(slotNames::get).collect(Collectors.toList());
 
-        int cap = Math.max(0, limit);
+        // Emit values with the redundant `key=` mask stripped (the key is the column name).
+        // Read-side only — stored values are untouched so reconstruction stays byte-exact.
         List<List<String>> occurrences = new ArrayList<>(Math.min(cap, entries.size()));
         for (int i = 0; i < entries.size() && occurrences.size() < cap; i++) {
             List<String> pv = entries.get(i).getParameterValues();
-            if (keep == null) {
-                occurrences.add(pv);
-            } else {
-                List<String> row = new ArrayList<>(keep.size());
-                for (int j : keep) row.add(j < pv.size() ? pv.get(j) : null);
-                occurrences.add(row);
+            List<Integer> idx = keep != null ? keep : null;
+            int n = idx != null ? idx.size() : pv.size();
+            List<String> row = new ArrayList<>(n);
+            for (int k = 0; k < n; k++) {
+                int j = idx != null ? idx.get(k) : k;
+                String v = j < pv.size() ? pv.get(j) : null;
+                String name = j < slotNames.size() ? slotNames.get(j) : null;
+                row.add(TemplateNormalizer.stripKeyPrefix(v, name));
             }
+            occurrences.add(row);
         }
         return new StructuredQueryResult(template.getId(), template.getPattern(),
-                outSlots, matched, occurrences);
+                outSlots, matched, scanCapped, occurrences);
     }
 
     public record StructuredQueryResult(long templateId, String template, List<String> slots,
-                                        long matchedCount, List<List<String>> occurrences) {}
+                                        long matchedCount, boolean scanCapped,
+                                        List<List<String>> occurrences) {}
 
     public List<String> replayLogs(Duration window) {
         return replayLogs(window, Integer.MAX_VALUE);
@@ -253,8 +274,15 @@ public class LogQueryService {
     private boolean matchesFilters(Template template, LogEntry entry, Map<String, String> filters) {
         Map<String, String> paramMap = normalizer.buildParameterMap(
                 template.getPattern(), entry.getParameterValues());
-        return filters.entrySet().stream()
-                .allMatch(f -> f.getValue().equals(paramMap.get(f.getKey())));
+        return filters.entrySet().stream().allMatch(f -> {
+            String raw = paramMap.get(f.getKey());
+            if (raw == null) return false;
+            // Accept either the raw stored value (e.g. "user=usr_1") or the stripped
+            // display value (e.g. "usr_1") — the latter is what query/inspect surface,
+            // so an agent can filter by exactly the value it just saw.
+            return f.getValue().equals(raw)
+                || f.getValue().equals(TemplateNormalizer.stripKeyPrefix(raw, f.getKey()));
+        });
     }
 
     /**

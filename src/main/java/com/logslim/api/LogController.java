@@ -2,7 +2,9 @@ package com.logslim.api;
 
 import com.logslim.query.LogQueryService;
 import com.logslim.storage.RawLogDao;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -30,28 +32,27 @@ public class LogController {
 
     @PostMapping("/query")
     public List<String> query(@RequestBody QueryRequest req) {
-        Duration window = req.last() != null ? parseDuration(req.last()) : null;
         Map<String, String> filters = req.filters() != null ? req.filters() : Map.of();
         int limit = req.limit() != null ? Math.max(1, Math.min(req.limit(), 5000)) : 500;
-        return queryService.queryByPattern(req.pattern(), filters, window, limit);
+        Instant[] range = resolveRange(req.from(), req.to(), req.last());
+        return queryService.queryByPattern(req.pattern(), filters, range[0], range[1], limit);
     }
 
     @PostMapping("/query-structured")
     public Map<String, Object> queryStructured(@RequestBody StructuredQueryRequest req) {
-        Duration window = req.last() != null ? parseDuration(req.last()) : null;
         Map<String, String> filters = req.filters() != null ? req.filters() : Map.of();
         int limit = req.limit() != null ? Math.max(1, Math.min(req.limit(), 5000)) : 500;
-        Instant to   = Instant.now();
-        Instant from = window != null ? to.minus(window) : Instant.EPOCH;
+        Instant[] range = resolveRange(req.from(), req.to(), req.last());
 
         var result = queryService.queryStructured(
-                req.pattern(), filters, from, to, limit, req.slots());
+                req.pattern(), filters, range[0], range[1], limit, req.slots());
 
         return Map.of(
                 "templateId",   result.templateId(),
                 "template",     result.template() != null ? result.template() : "",
                 "slots",        result.slots(),
                 "matchedCount", result.matchedCount(),
+                "scanCapped",   result.scanCapped(),
                 "returned",     result.occurrences().size(),
                 "occurrences",  result.occurrences());
     }
@@ -110,23 +111,39 @@ public class LogController {
                 .toList();
     }
 
+    /**
+     * Resolve a [from, to] window for the query endpoints. Absolute from/to win; else a
+     * relative `last` ends at now; else EPOCH..now (all history — kept bounded by the SQL
+     * row limit, so it no longer scans the whole table). A malformed value yields HTTP 400.
+     */
+    private Instant[] resolveRange(String from, String to, String last) {
+        Instant t = to != null ? parseInstant(to) : Instant.now();
+        Instant f;
+        if (from != null) {
+            f = parseInstant(from);
+        } else if (last != null) {
+            f = t.minus(parseDuration(last));
+        } else {
+            f = Instant.EPOCH;
+        }
+        return new Instant[]{f, t};
+    }
+
     private Instant parseInstant(String s) {
         try { return Instant.parse(s); } catch (DateTimeParseException ignored) {}
         try { return LocalDateTime.parse(s, LOCAL_FMT).toInstant(ZoneOffset.UTC); }
         catch (DateTimeParseException ignored) {}
-        return Instant.EPOCH;
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "Invalid timestamp '" + s + "'; expected ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC).");
     }
 
     private Duration parseDuration(String s) {
-        s = s.trim().toLowerCase();
-        if (s.endsWith("d")) return Duration.ofDays(Long.parseLong(s.replace("d", "")));
-        if (s.endsWith("h")) return Duration.ofHours(Long.parseLong(s.replace("h", "")));
-        if (s.endsWith("m")) return Duration.ofMinutes(Long.parseLong(s.replace("m", "")));
-        return Duration.ofHours(1);
+        return DurationParser.parse(s);
     }
 
-    record QueryRequest(String pattern, Map<String, String> filters, String last, Integer limit) {}
+    record QueryRequest(String pattern, Map<String, String> filters, String from, String to,
+                        String last, Integer limit) {}
 
-    record StructuredQueryRequest(String pattern, Map<String, String> filters, String last,
-                                  Integer limit, List<String> slots) {}
+    record StructuredQueryRequest(String pattern, Map<String, String> filters, String from, String to,
+                                  String last, Integer limit, List<String> slots) {}
 }

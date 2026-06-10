@@ -100,10 +100,11 @@ const server = new McpServer(
       "primitives — you compose them.\n\n" +
       "Default investigation workflow — escalate only as needed:\n" +
       "1. ORIENT: `list_templates` (and `get_stats`) to see what the service logs.\n" +
-      "2. DETECT a spike: call `template_counts` for the suspect window AND for an equal-length " +
-      "window just before it, then diff — a template frequent in the window but rare/absent in " +
-      "the baseline is the anomaly. Also call `new_templates` for the window: a never-before-seen " +
-      "pattern is a prime root-cause candidate.\n" +
+      "2. DETECT a spike: call `template_counts` with `baseline: true` for the suspect window — " +
+      "the server compares it against the equal-length window just before and returns windowCount " +
+      "+ baselineCount + ratio per template, so a template frequent in the window but rare/absent " +
+      "in the baseline (high or null ratio) is the anomaly, in one call. Also call `new_templates` " +
+      "for the window: a never-before-seen pattern is a prime root-cause candidate.\n" +
       "3. LOCALIZE: `template_timeseries` on a suspect template to pinpoint the onset minute.\n" +
       "4. DRILL: `inspect_template` gives slot-value distributions + numeric summaries " +
       "(min/max/avg/p95) WITHOUT pulling rows — use it for any 'which values / how many / what " +
@@ -129,19 +130,21 @@ server.registerTool(
     title: "Count templates in a window",
     description:
       "Per-template occurrence counts within a time window, highest first. The core signal for " +
-      "'what is happening / what changed'. To find a SPIKE, call this twice — once for the " +
-      "suspect window and once for an equal-length window just before it — and compare: a " +
-      "template that is frequent in the window but absent/rare in the baseline is the anomaly. " +
+      "'what is happening / what changed'. To find a SPIKE, set `baseline: true`: the server " +
+      "compares the window against the equal-length window immediately before it and returns, per " +
+      "template, windowCount + baselineCount + ratio (ratio null = never seen in the baseline, i.e. " +
+      "a brand-new spike — sorted first). This replaces calling twice and diffing by hand. " +
       "Use `window` from/to OR a relative `last`.",
     inputSchema: {
       from: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) start."),
       to: z.string().optional().describe("End (defaults to now)."),
       last: z.string().optional().describe("Relative window if from/to omitted, e.g. '5m', '1h' (default 1h)."),
+      baseline: z.boolean().optional().describe("Compare vs the equal-length window just before; adds baselineCount + ratio per template."),
     },
   },
-  tool(async ({ from, to, last }) =>
+  tool(async ({ from, to, last, baseline }) =>
     cap(
-      await api("GET", "/api/template-counts", { query: { from, to, last } }),
+      await api("GET", "/api/template-counts", { query: { from, to, last, baseline: baseline ? "true" : undefined } }),
       200,
       "More templates exist. Narrow the window to focus on the spike.",
     ),
@@ -161,7 +164,10 @@ server.registerTool(
       "Templates whose earliest occurrence in all of history falls inside the given window — " +
       "i.e. log shapes that appeared for the first time here. These are prime root-cause " +
       "candidates (a new error type, a new migration line, a circuit-breaker message). Most " +
-      "useful with a NARROW window around the suspected onset; a wide window will flag many.",
+      "useful with a NARROW window around the suspected onset; a wide window will flag many. " +
+      "CAVEAT: 'new' means new to the INGESTED dataset, not to the running service — first-seen " +
+      "is a global MIN over stored data, so this only signals true novelty when pre-incident " +
+      "baseline data is also ingested; on a single incident file every template looks new.",
     inputSchema: {
       from: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) start."),
       to: z.string().optional().describe("End (defaults to now)."),
@@ -217,15 +223,19 @@ server.registerTool(
       "sizes, counts) — a summary (min / max / avg / p50 / p95). This is the cheapest way to " +
       "answer 'WHICH values / HOW MANY distinct / what DISTRIBUTION' — use it BEFORE `query_logs`, " +
       "which pulls per-occurrence data. By default returns no example lines; set `recent` > 0 " +
-      "only when you actually need reconstructed sample lines.",
+      "only when you actually need reconstructed sample lines. Pass from/to or `last` to scope " +
+      "the distributions to the window you localized (default: all-time).",
     inputSchema: {
       templateId: z.number().int().describe("Template id from list_templates / template_counts."),
       topN: z.number().int().min(1).max(50).optional().describe("Top values to return per slot (default 10)."),
       recent: z.number().int().min(0).max(100).optional().describe("Reconstructed example lines (default 0 = none; token-expensive)."),
+      from: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) start (scopes distributions)."),
+      to: z.string().optional().describe("End (defaults to now when from/last given)."),
+      last: z.string().optional().describe("Relative window, e.g. '5m', '1h' (scopes distributions)."),
     },
   },
-  tool(({ templateId, topN, recent }) =>
-    api("GET", `/api/templates/${templateId}`, { query: { topN: topN ?? 10, recent: recent ?? 0 } }),
+  tool(({ templateId, topN, recent, from, to, last }) =>
+    api("GET", `/api/templates/${templateId}`, { query: { topN: topN ?? 10, recent: recent ?? 0, from, to, last } }),
   ),
 );
 
@@ -301,28 +311,37 @@ server.registerTool(
     inputSchema: {
       pattern: z.string().describe("Template pattern text, e.g. 'User {id} failed login'."),
       filters: z.record(z.string()).optional().describe("Slot filters as {name: value}, e.g. {\"id\": \"456\"}."),
-      last: z.string().optional().describe("Relative window, e.g. '24h', '7d'."),
+      from: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) start."),
+      to: z.string().optional().describe("End (defaults to now)."),
+      last: z.string().optional().describe("Relative window if from/to omitted, e.g. '24h', '7d'."),
       limit: z.number().int().min(1).max(5000).optional().describe("Max occurrences (default 200). Narrow with `filters`/`slots` rather than raising this."),
       slots: z.array(z.string()).optional().describe("Project to only these slot names, e.g. ['user','pool_wait']. Omit for all slots."),
       format: z.enum(["structured", "lines"]).optional().describe("'structured' (default): template + param tuples. 'lines': reconstructed full text (token-expensive)."),
     },
   },
-  tool(async ({ pattern, filters, last, limit, slots, format }) => {
+  tool(async ({ pattern, filters, from, to, last, limit, slots, format }) => {
+    // Reconcile the server limit with the client display cap so they can't contradict.
+    const MAX = 200;
+    const effLimit = Math.min(limit ?? MAX, MAX);
     if (format === "lines") {
       return cap(
-        await api("POST", "/api/query", { body: { pattern, filters: filters ?? {}, last, limit: limit ?? 200 } }),
-        200,
+        await api("POST", "/api/query", { body: { pattern, filters: filters ?? {}, from, to, last, limit: effLimit } }),
+        MAX,
         "More matches exist. Add a slot `filter`, or use the default structured format to see more cheaply.",
       );
     }
     // Structured (default): template stated once + parameter tuples; cap the occurrence list.
     const res: any = await api("POST", "/api/query-structured", {
-      body: { pattern, filters: filters ?? {}, last, limit: limit ?? 200, slots },
+      body: { pattern, filters: filters ?? {}, from, to, last, limit: effLimit, slots },
     });
-    if (res && Array.isArray(res.occurrences) && res.occurrences.length > 200) {
-      res.occurrences = res.occurrences.slice(0, 200);
+    if (res && Array.isArray(res.occurrences) && res.occurrences.length > MAX) {
+      res.occurrences = res.occurrences.slice(0, MAX);
       res.truncated = true;
-      res.hint = "Occurrences truncated to 200. Add a slot `filter`, project with `slots`, or narrow `last`.";
+      res.hint = `Occurrences truncated to ${MAX}. Add a slot \`filter\`, project with \`slots\`, or narrow the window.`;
+    }
+    // matchedCount stays the true window total; `returned` must reflect what we actually emit.
+    if (res && Array.isArray(res.occurrences)) {
+      res.returned = res.occurrences.length;
     }
     return res;
   }),
@@ -339,7 +358,7 @@ server.registerTool(
       "Reconstructs the EXACT original log lines for a window, in timestamp order (templates " +
       "and unmatched raw lines interleaved). This is the ground-truth escape hatch — but it " +
       "returns raw text and is the most TOKEN-EXPENSIVE tool. Use it LAST and on a NARROW " +
-      "window, after `investigate`/`list_templates` have told you where to look. Keep `limit` small.",
+      "window, after `template_counts`/`list_templates` have told you where to look. Keep `limit` small.",
     inputSchema: {
       from: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) start."),
       to: z.string().optional().describe("ISO-8601 or 'yyyy-MM-dd HH:mm:ss' (UTC) end."),
@@ -396,9 +415,10 @@ server.registerPrompt(
             text:
               `Investigate what went wrong in ${scope} using the LogSlim tools. Compose the ` +
               `atomic primitives — do not expect a single answer call.\n\n` +
-              `1. SPIKE: call \`template_counts\` for the window, then again for an equal-length ` +
-              `window immediately before it, and diff them. Templates frequent in the window but ` +
-              `rare/absent in the baseline are the anomalies.\n` +
+              `1. SPIKE: call \`template_counts\` with \`baseline: true\` for the window — the server ` +
+              `compares it against the equal-length window immediately before and returns ` +
+              `windowCount + baselineCount + ratio per template in one call. Templates frequent in ` +
+              `the window but rare/absent in the baseline (high or null ratio) are the anomalies.\n` +
               `2. TRIGGER: call \`new_templates\` for the window — a pattern first seen here ` +
               `(a new error, a migration line, a circuit-breaker message) is the likely root cause. ` +
               `The root cause is usually low-volume and early, not the loudest signal.\n` +
