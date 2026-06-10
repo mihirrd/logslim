@@ -2,6 +2,7 @@ package com.logslim.parsing;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -67,5 +68,32 @@ class LogTokenizerTest {
     void multipleSpaces_handledGracefully() {
         ParsedLog parsed = tokenizer.tokenize("User  123  failed", "test");
         assertThat(parsed.tokens()).hasSize(3);
+    }
+
+    @Test
+    void lineWithoutTimestamp_isUnresolvedAndCounted() {
+        LogTokenizer t = new LogTokenizer(new TokenClassifier());
+        ParsedLog parsed = t.tokenize("User 123 failed login", "test");
+        assertThat(parsed.timestampResolved()).isFalse();
+        assertThat(parsed.timestamp()).isNull();              // no silent "now"
+        assertThat(t.unresolvedTimestampCount()).isEqualTo(1);
+    }
+
+    @Test
+    void lineWithIsoTimestamp_isResolvedAndNotCounted() {
+        LogTokenizer t = new LogTokenizer(new TokenClassifier());
+        ParsedLog parsed = t.tokenize("2026-05-15T14:00:00.003Z INFO health check ok", "test");
+        assertThat(parsed.timestampResolved()).isTrue();
+        assertThat(parsed.timestamp()).isEqualTo(Instant.parse("2026-05-15T14:00:00.003Z"));
+        assertThat(t.unresolvedTimestampCount()).isZero();
+    }
+
+    @Test
+    void blankLine_unresolvedButNotCounted() {
+        LogTokenizer t = new LogTokenizer(new TokenClassifier());
+        ParsedLog parsed = t.tokenize("   ", "test");
+        assertThat(parsed.timestampResolved()).isFalse();
+        assertThat(parsed.timestamp()).isNull();
+        assertThat(t.unresolvedTimestampCount()).isZero();    // benign, not flagged
     }
 }

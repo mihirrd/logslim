@@ -1,5 +1,7 @@
 package com.logslim.parsing;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -7,9 +9,23 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class LogTokenizer {
+
+    private static final Logger log = LoggerFactory.getLogger(LogTokenizer.class);
+
+    /**
+     * Count of non-blank lines for which no timestamp could be parsed from the content.
+     * Exposed so callers/ops can monitor it (a rising rate means logs are being stored with
+     * a fallback event time rather than their own). Thread-safe: the batch parse stage is parallel.
+     */
+    private final AtomicLong unresolvedTimestamps = new AtomicLong();
+
+    public long unresolvedTimestampCount() {
+        return unresolvedTimestamps.get();
+    }
 
     private static final List<DateTimeFormatter> TIMESTAMP_FORMATTERS = List.of(
         // With offset: 2025-12-29T09:56:43.968+0530
@@ -30,11 +46,15 @@ public class LogTokenizer {
 
     /**
      * Split a raw log line on whitespace, classify each token, and return a ParsedLog.
-     * Timestamp defaults to now if not embedded in the line.
+     * The timestamp is parsed from the line when present; when it isn't, it is left {@code null}
+     * (and flagged unresolved) so the caller can supply a fallback rather than mislabelling the
+     * event as "now".
      */
     public ParsedLog tokenize(String rawLine, String source) {
         if (rawLine == null || rawLine.isBlank()) {
-            return new ParsedLog(List.of(), rawLine == null ? "" : rawLine, Instant.now(), source);
+            // Blank/null lines carry no event time and no content — unresolved, but not counted
+            // or warned (they're benign and never become structured entries).
+            return new ParsedLog(List.of(), rawLine == null ? "" : rawLine, null, source, false);
         }
 
         String[] parts = rawLine.trim().split("\\s+");
@@ -49,7 +69,22 @@ public class LogTokenizer {
         }
 
         Instant timestamp = extractTimestamp(tokens);
-        return new ParsedLog(tokens, rawLine, timestamp, source);
+        if (timestamp == null) {
+            noteUnresolvedTimestamp(rawLine);
+        }
+        return new ParsedLog(tokens, rawLine, timestamp, source, timestamp != null);
+    }
+
+    private void noteUnresolvedTimestamp(String rawLine) {
+        long n = unresolvedTimestamps.incrementAndGet();
+        // Warn once (not per line — a timestamp-less log format would otherwise flood the log);
+        // every occurrence is still counted in unresolvedTimestampCount().
+        if (n == 1) {
+            String snippet = rawLine.length() > 200 ? rawLine.substring(0, 200) + "…" : rawLine;
+            log.warn("No parseable timestamp in log line; event time will be carried forward from "
+                    + "the previous line (or fall back to ingest time). Further occurrences are "
+                    + "counted, not logged. First example: \"{}\"", snippet);
+        }
     }
 
     private Instant extractTimestamp(List<Token> tokens) {
@@ -78,7 +113,7 @@ public class LogTokenizer {
 
             break; // only attempt the first timestamp-shaped token
         }
-        return Instant.now();
+        return null; // no parseable timestamp — caller supplies the fallback
     }
 
     private Instant tryParseTimestamp(String value) {

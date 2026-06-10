@@ -131,7 +131,9 @@ public class TemplateExtractor {
 
     public Template process(LogGroup group) {
         ParsedLog parsed = tokenizer.tokenize(group.headerLine(), group.source());
-        Instant ts = group.sourceTimestamp() != null ? group.sourceTimestamp() : parsed.timestamp();
+        // Single-line path has no batch context to carry forward from, so an unstamped line
+        // falls back to ingest time — but only after being flagged/counted in the tokenizer.
+        Instant ts = resolveTimestamp(group.sourceTimestamp(), parsed, null, Instant.now());
         List<Token> orig = parsed.tokens();
         List<String> masked = toPreMasked(orig);
 
@@ -144,7 +146,7 @@ public class TemplateExtractor {
 
         Template template = resolveTemplate(drain, orig, group.headerLine());
         if (template == null) {
-            storeRaw(group.headerLine(), group.source(), parsed.timestamp());
+            storeRaw(group.headerLine(), group.source(), ts);
             return null;
         }
 
@@ -176,6 +178,19 @@ public class TemplateExtractor {
             cache.refresh(template);
         }
         return template;
+    }
+
+    /**
+     * Resolve the event timestamp for a group: prefer a source-provided timestamp (e.g. a Kafka
+     * record's UTC epoch), else the timestamp parsed from the line, else carry forward the last
+     * known event time (so unstamped/continuation lines stay in chronological order), else a
+     * stable fallback. Never silently stamps an unparseable line with the wall-clock "now".
+     */
+    private static Instant resolveTimestamp(Instant sourceTs, ParsedLog parsed,
+                                            Instant lastKnownTs, Instant fallback) {
+        if (sourceTs != null) return sourceTs;
+        if (parsed.timestampResolved()) return parsed.timestamp();
+        return lastKnownTs != null ? lastKnownTs : fallback;
     }
 
     /**
@@ -224,14 +239,25 @@ public class TemplateExtractor {
         List<RawLog>   raws    = new ArrayList<>();
         Map<Long, Long> occurrenceDeltas = new LinkedHashMap<>();
 
+        // Carry-forward for lines without their own timestamp: an unstamped line inherits the
+        // previous line's event time, preserving chronological order. This state is intentionally
+        // per-batch (not persisted across processBatch calls) to keep the extractor stateless
+        // across ingestion sessions; the first orphan lines of a batch with no preceding real
+        // timestamp fall back to ingest "now".
+        Instant batchFallback = Instant.now();
+        Instant lastKnownTs = null;
+
         for (ParsedHolder h : parsed) {
             LogGroup group = h.group();
             List<Token> orig = h.orig();
             List<String> masked = h.masked();
             ParsedLog p = h.parsed();
-            // Prefer the source-provided timestamp (e.g. Kafka record UTC epoch) so that
-            // logs with no timezone in their embedded timestamp are stored correctly in UTC.
-            Instant ts = group.sourceTimestamp() != null ? group.sourceTimestamp() : p.timestamp();
+            // Prefer the source-provided timestamp (e.g. Kafka record UTC epoch); else the
+            // timestamp parsed from the line; else carry forward the last known event time.
+            Instant ts = resolveTimestamp(group.sourceTimestamp(), p, lastKnownTs, batchFallback);
+            if (group.sourceTimestamp() != null || p.timestampResolved()) {
+                lastKnownTs = ts;
+            }
 
             DrainTree.ProcessResult drain = drainTree.process(masked);
 
