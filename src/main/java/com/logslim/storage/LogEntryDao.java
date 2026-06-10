@@ -104,6 +104,31 @@ public class LogEntryDao {
                 (rs, i) -> new AbstractMap.SimpleEntry<>(rs.getString("v"), rs.getLong("c")));
     }
 
+    /**
+     * Numeric aggregate for a slot, or {@code null} if its values aren't numeric.
+     * Strips a leading {@code key=} and a trailing unit ({@code ms}, {@code s}, {@code %}, …)
+     * before casting, so {@code duration=16ms} → 16 while {@code user=usr_00337} stays
+     * non-numeric (won't be counted). Returns [count, min, max, avg, p50, p95].
+     */
+    public double[] numericSummaryForSlot(long templateId, int slotIndex) {
+        String numExpr = ("TRY_CAST(regexp_replace(regexp_replace(" +
+                "json_extract_string(parameter_values, '$[%d]'), '^.*=', ''), " +
+                "'[a-zA-Z%%]+$', '') AS DOUBLE)").formatted(slotIndex);
+        String sql = "SELECT COUNT(num) AS n, MIN(num) AS mn, MAX(num) AS mx, AVG(num) AS av, " +
+                "quantile_cont(num, 0.5) AS p50, quantile_cont(num, 0.95) AS p95 " +
+                "FROM (SELECT " + numExpr + " AS num FROM log_entries WHERE template_id = :tid) t " +
+                "WHERE num IS NOT NULL";
+        return jdbc.query(sql,
+                new MapSqlParameterSource().addValue("tid", templateId),
+                (org.springframework.jdbc.core.ResultSetExtractor<double[]>) rs -> {
+                    if (!rs.next()) return null;
+                    long n = rs.getLong("n");
+                    if (n == 0) return null;
+                    return new double[]{ n, rs.getDouble("mn"), rs.getDouble("mx"),
+                            rs.getDouble("av"), rs.getDouble("p50"), rs.getDouble("p95") };
+                });
+    }
+
     public long countDistinctForSlot(long templateId, int slotIndex) {
         String sql = ("SELECT COUNT(DISTINCT json_extract_string(parameter_values, '$[%d]')) " +
                       "FROM log_entries WHERE template_id = :tid").formatted(slotIndex);
@@ -124,6 +149,25 @@ public class LogEntryDao {
                 Map.of("from", from.toEpochMilli(), "to", to.toEpochMilli()),
                 (org.springframework.jdbc.core.RowCallbackHandler)
                 rs -> result.put(rs.getLong("template_id"), rs.getLong("cnt")));
+        return result;
+    }
+
+    /**
+     * Earliest log-event timestamp seen for each template, across all history.
+     * Keyed by template id, value is epoch millis. Used to detect templates whose
+     * very first occurrence falls inside an investigation window (event-time based,
+     * independent of when the row was ingested).
+     */
+    public Map<Long, Long> firstSeenByTemplate() {
+        String sql = """
+                SELECT template_id, MIN(log_timestamp) AS first_seen
+                FROM log_entries
+                GROUP BY template_id
+                """;
+        Map<Long, Long> result = new java.util.HashMap<>();
+        jdbc.query(sql, Map.of(),
+                (org.springframework.jdbc.core.RowCallbackHandler)
+                rs -> result.put(rs.getLong("template_id"), rs.getLong("first_seen")));
         return result;
     }
 

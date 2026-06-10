@@ -53,9 +53,10 @@ public class TemplateController {
     @GetMapping("/templates/{id}")
     public ResponseEntity<Map<String, Object>> inspect(
             @PathVariable long id,
-            @RequestParam(defaultValue = "10") int recent) {
+            @RequestParam(defaultValue = "10") int recent,
+            @RequestParam(defaultValue = "5") int topN) {
 
-        return queryService.getTemplateFull(id, recent)
+        return queryService.getTemplateFull(id, recent, topN)
                 .map(this::detailToMap)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
@@ -106,6 +107,54 @@ public class TemplateController {
                 .collect(Collectors.toList());
     }
 
+    @GetMapping("/template-counts")
+    public List<Map<String, Object>> templateCounts(
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String last) {
+
+        Instant[] range = resolveRange(from, to, last);
+        return queryService.templateCounts(range[0], range[1]).stream()
+                .map(c -> Map.<String, Object>of(
+                        "templateId", c.templateId(),
+                        "pattern",    c.pattern(),
+                        "count",      c.count()))
+                .collect(Collectors.toList());
+    }
+
+    @GetMapping("/new-templates")
+    public List<Map<String, Object>> newTemplates(
+            @RequestParam(required = false) String from,
+            @RequestParam(required = false) String to,
+            @RequestParam(required = false) String last) {
+
+        Instant[] range = resolveRange(from, to, last);
+        return queryService.newTemplates(range[0], range[1]).stream()
+                .map(n -> Map.<String, Object>of(
+                        "templateId",  n.templateId(),
+                        "pattern",     n.pattern(),
+                        "firstSeenMs", n.firstSeenMs(),
+                        "windowCount", n.windowCount()))
+                .collect(Collectors.toList());
+    }
+
+    private static double round(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    /** Resolve a [from, to] window from explicit timestamps or a relative `last` (default 1h). */
+    private Instant[] resolveRange(String from, String to, String last) {
+        Instant t = to != null ? parseInstant(to) : Instant.now();
+        Instant f;
+        if (from != null) {
+            f = parseInstant(from);
+        } else {
+            Duration window = last != null ? parseDuration(last) : Duration.ofHours(1);
+            f = t.minus(window);
+        }
+        return new Instant[]{f, t};
+    }
+
     private Map<String, Object> toMap(Template t) {
         return Map.of(
             "id",        t.getId(),
@@ -119,16 +168,22 @@ public class TemplateController {
     private Map<String, Object> detailToMap(TemplateDetailFull d) {
         Template t = d.template();
 
-        List<Map<String, Object>> slots = d.slotStats().stream().map(s ->
-            Map.<String, Object>of(
-                "index",     s.slotIndex(),
-                "type",      s.slotType(),
-                "distinct",  s.distinctCount(),
-                "topValues", s.topValues().stream()
-                              .map(e -> Map.of("value", e.getKey(), "count", e.getValue()))
-                              .collect(Collectors.toList())
-            )
-        ).collect(Collectors.toList());
+        List<Map<String, Object>> slots = d.slotStats().stream().map(s -> {
+            Map<String, Object> slot = new java.util.LinkedHashMap<>();
+            slot.put("index",    s.slotIndex());
+            slot.put("type",     s.slotType());
+            slot.put("distinct", s.distinctCount());
+            slot.put("topValues", s.topValues().stream()
+                    .map(e -> Map.of("value", e.getKey(), "count", e.getValue()))
+                    .collect(Collectors.toList()));
+            if (s.numeric() != null) {
+                var n = s.numeric();
+                slot.put("numeric", Map.of(
+                        "count", n.count(), "min", n.min(), "max", n.max(),
+                        "avg", round(n.avg()), "p50", round(n.p50()), "p95", round(n.p95())));
+            }
+            return slot;
+        }).collect(Collectors.toList());
 
         List<Map<String, String>> recentLogs = d.recentEntries().stream().map(e -> {
             String ts   = TS_FMT.format(e.getLogTimestamp());
