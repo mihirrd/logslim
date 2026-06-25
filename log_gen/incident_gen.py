@@ -27,13 +27,27 @@ Root cause discoverability via LogSlim
 6. `raw-logs --search "idx_orders_user_id"` finds the DROP INDEX statement.
 """
 
+import os
 import random
 import sys
 from datetime import datetime, timezone, timedelta
 
 random.seed(42)
 
-BASE = datetime(2026, 5, 15, 14, 0, 0, tzinfo=timezone.utc)
+# The incident spans ~3600s (1h). Anchor it so the timeline ENDS at "now",
+# i.e. it covers the last hour. This keeps the demo fresh: replay --last 1h
+# returns the whole incident and the dashboard "Last Seen" reflects real
+# event recency instead of drifting weeks into the past.
+# Override with INCIDENT_BASE (ISO-8601, e.g. 2026-05-15T14:00:00Z) for a
+# fixed, reproducible timeline.
+INCIDENT_SPAN_SECONDS = 3600
+
+_base_env = os.environ.get("INCIDENT_BASE")
+if _base_env:
+    BASE = datetime.fromisoformat(_base_env.replace("Z", "+00:00"))
+else:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    BASE = now - timedelta(seconds=INCIDENT_SPAN_SECONDS)
 
 USERS    = [f"usr_{i:05d}" for i in range(1, 401)]
 ORDERS   = [f"ord_{i:07d}" for i in range(1000000, 1002001)]
@@ -91,7 +105,7 @@ def normal_traffic(start, end, rate_per_min=55):
             method, route, status, base_ms = random.choice(routes)
             dur = base_ms + random.randint(-3, 8)
             uid = random.choice(USERS)
-            emit("api-gateway",
+            emit(t,
                  "INFO ",
                  "api-gateway",
                  f"HTTP {method} {route} status={status} user={uid} duration={dur}ms")
