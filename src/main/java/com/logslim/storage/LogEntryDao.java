@@ -65,6 +65,45 @@ public class LogEntryDao {
         }
     }
 
+    /**
+     * All entries of a template still in the writable tier (base table pre-compact,
+     * {@code log_entries_live} post-compact) — the rows a relearn fold may rewrite.
+     */
+    public List<LogEntry> findWritableByTemplateId(long templateId) {
+        String sql = "SELECT * FROM " + writeTarget.tableFor("log_entries")
+                + " WHERE template_id = :templateId";
+        return jdbc.query(sql, Map.of("templateId", templateId), ROW_MAPPER);
+    }
+
+    /**
+     * Entries of a template already sealed in immutable Parquet partitions.
+     * Zero pre-compact (there is no archive yet).
+     */
+    public long countArchivedByTemplateId(long templateId) {
+        if (!writeTarget.isCompacted()) return 0;
+        Long n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM log_entries_archive WHERE template_id = :id",
+                Map.of("id", templateId), Long.class);
+        return n == null ? 0 : n;
+    }
+
+    /**
+     * Re-file a fragment's entries onto a merged template with re-planned params
+     * (relearn fold): delete the fragment's rows from the writable tier and
+     * re-insert the rewritten entries under fresh ids. Delete+insert rather than
+     * UPDATE because DuckDB updates rewrite the whole row and re-insert the PK
+     * into the ART index while the old version still holds it, raising spurious
+     * duplicate-key errors inside one transaction. Entry ids are internal, so
+     * fresh ids are harmless. Archived rows are immutable and never touched.
+     */
+    @Transactional
+    public void refileEntries(long fromTemplateId, List<LogEntry> rewritten) {
+        jdbc.update("DELETE FROM " + writeTarget.tableFor("log_entries")
+                        + " WHERE template_id = :tid",
+                Map.of("tid", fromTemplateId));
+        insertBatch(rewritten);
+    }
+
     public List<LogEntry> findByTemplateId(long templateId, int limit) {
         String sql = """
                 SELECT * FROM log_entries WHERE template_id = :templateId

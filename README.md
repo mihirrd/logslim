@@ -24,24 +24,24 @@ A busy service emits millions of log lines an hour. You cannot hand those to an 
 
 LogSlim collapses that firehose into **templates + counts + per-slot distributions**, *losslessly*. An agent then investigates the way a human SRE does — **overview → anomaly → drill → raw** — and pulls exact log lines only for the narrow window it actually needs.
 
-On the included `incident.log` (13,728 lines of a real DB-pool-exhaustion cascade), Drain extracts **22 templates**. A whole-service overview is a couple thousand tokens instead of ~400k of raw text, and the root-cause chain (deploy → dropped index → SeqScan → pool exhaustion → OOM → circuit breaker) surfaces at the *top* of the anomaly list rather than as a needle in a haystack.
+On the included `incident.log` (13,728 lines of a real DB-pool-exhaustion cascade), the parser extracts **91 templates, the top 15 of which cover 90% of the volume — with 100% of lines structured**. A whole-service overview is a couple thousand tokens instead of ~400k of raw text, and the root-cause chain (deploy → dropped index → SeqScan → pool exhaustion → OOM → circuit breaker) surfaces at the *top* of the anomaly list rather than as a needle in a haystack.
 
 ---
 
 ## How It Works
 
 ```
-Raw log line:  "2024-01-15 10:23:45 DEBUG 1234 DB SELECT table=sessions 5 rows 12ms"
-               ↓  Drain algorithm
-Template:      "{ts} DEBUG {num} DB SELECT table=sessions {rows} {duration}"
-Parameters:    ["2024-01-15 10:23:45", "1234", "5 rows", "12ms"]
+Raw log line:  "2024-01-15 10:23:45 DEBUG 1234 DB SELECT table=sessions req-755556 12ms"
+               ↓  universal masking + learned variables
+Template:      "{ts} DEBUG {num} DB SELECT table=sessions {var} {size}"
+Parameters:    ["2024-01-15 10:23:45", "1234", "req-755556", "12ms"]
 ```
 
-1. **Drain algorithm** learns which token positions are dynamic by observing variation across lines — no regex configuration needed. Novel token formats (like `req-755556`) are discovered automatically after seeing two different values.
+1. **Universal masking** (`EntityMasker`) replaces dataset-independent syntax — timestamps, IPs, UUIDs, paths, hex, sizes, numbers — in a single deterministic pass over the whole line, including entities glued mid-token (`10.0.0.1:50010:Got`). The masked shape is the template key: every line gets a template, deterministically, independent of input order.
 
-2. **Pre-masking** handles well-known token types (numbers, UUIDs, IPs, hashes) immediately on the first occurrence, so common patterns lock after a single line.
+2. **Learned variables** (`TemplateLearner`) discover each dataset's own ID species (session IDs, container names, request tokens) statistically from the corpus: a token position that varies across otherwise-identical shapes becomes a `{var}` slot only when its cardinality is high *and* its values look like identifiers — so `succeeded` vs `failed` stays two templates while `req-755556` collapses into one. No per-dataset regexes, no configuration; the template set is a pure function of the data.
 
-3. **Storage** separates templates from parameters. A template seen 5,000 times is stored once; only the variable values per occurrence are stored. DuckDB's columnar encoding + zstd compression handles the rest.
+3. **Storage** separates templates from parameters. A template seen 5,000 times is stored once; only the variable values per occurrence are stored. DuckDB's columnar encoding + zstd compression handles the rest. Reconstruction is byte-exact — a line that wouldn't round-trip is kept verbatim in `raw_logs` (in practice: 0 lines on every validated dataset).
 
 4. **`logslim compact`** exports `log_entries` and `raw_logs` to Parquet files and replaces the tables with `UNION ALL` views. The database stays queryable after compaction.
 
@@ -216,7 +216,7 @@ Compression improves with log repetition — fewer distinct templates compress f
 
 **Lossless** — every line is exactly reconstructable. Multi-line entries (stack traces, `Caused by:` chains) are stored and replayed intact.
 
-**Zero configuration** — no regex patterns. Drain learns dynamic token positions from the data itself.
+**Zero configuration** — no per-dataset regex patterns. Universal syntax is masked deterministically; everything else that varies is learned from the data itself.
 
 **Queryable after compression** — `compact` replaces tables with DuckDB views over Parquet. All query commands work without decompressing anything.
 
@@ -232,7 +232,7 @@ Pull requests welcome. Before submitting:
 mvn clean test   # all tests must pass
 ```
 
-The suite covers Drain correctness (lock transitions, novel-token discovery, bootstrap), the end-to-end pipeline, lossless reconstruction including multi-line entries, parameter filtering, and temporal ordering. For new features, add integration tests in `src/test/java/com/logslim/integration/` that verify the invariants that matter most: **losslessness**, **correct grouping**, and **temporal order**. Open an issue first for large changes.
+The suite covers masking and learning correctness (split-vs-merge decisions, byte-exact round-trips through merged templates, determinism), the end-to-end pipeline, lossless reconstruction including multi-line entries, parameter filtering, and temporal ordering. For new features, add integration tests in `src/test/java/com/logslim/integration/` that verify the invariants that matter most: **losslessness**, **correct grouping**, and **temporal order**. Open an issue first for large changes.
 
 ---
 

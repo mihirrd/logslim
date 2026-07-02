@@ -73,11 +73,10 @@ class LogReconstructorTest {
 
     @Test
     void literalBracesInStaticToken_notTreatedAsPlaceholder() {
-        // The pattern stores standalone placeholders as full whitespace-delimited tokens.
-        // /api/v1/inventory/{sku} is a single static token containing a literal {sku} substring;
-        // it must be emitted verbatim without consuming a parameter value.
-        // Real dynamic placeholders ({ts}, {status}, {user}, {duration}) are complete tokens.
-        String pattern = "{ts} INFO  [api-gateway] HTTP GET /api/v1/inventory/{sku} {status} {user} {duration}";
+        // Escaped-brace scheme: literal source braces are stored doubled, so a literal
+        // {sku} substring in the original line is stored as {{sku}} and emitted verbatim
+        // without consuming a parameter value. Real dynamic placeholders are single-braced.
+        String pattern = "{ts} INFO  [api-gateway] HTTP GET /api/v1/inventory/{{sku}} {status} {user} {duration}";
         List<String> params = List.of("2026-05-15T14:21:00.257Z", "status=200", "user=usr_00169", "duration=10ms");
         String result = reconstructor.reconstruct(pattern, params);
         assertThat(result).isEqualTo(
@@ -87,7 +86,7 @@ class LogReconstructorTest {
     @Test
     void literalBracesInStaticToken_mapOverload_notTreatedAsPlaceholder() {
         // Same scenario via named-parameter map.
-        String pattern = "{ts} INFO  [api-gateway] HTTP GET /api/v1/inventory/{sku} {status} {user} {duration}";
+        String pattern = "{ts} INFO  [api-gateway] HTTP GET /api/v1/inventory/{{sku}} {status} {user} {duration}";
         Map<String, String> params = Map.of(
                 "ts", "2026-05-15T14:21:00.257Z",
                 "status", "status=200",

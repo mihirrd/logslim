@@ -129,6 +129,25 @@ public class TemplateDao {
         return jdbc.query("SELECT * FROM templates ORDER BY template_id", Map.of(), ROW_MAPPER);
     }
 
+    /**
+     * True when the template row lives in the writable tier (base table pre-compact,
+     * {@code templates_live} post-compact) — i.e. it can still be updated or deleted.
+     * Rows already exported to the templates Parquet archive return false.
+     */
+    public boolean existsInWritableTier(long templateId) {
+        Long n = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM " + writeTarget.tableFor("templates")
+                        + " WHERE template_id = :id",
+                Map.of("id", templateId), Long.class);
+        return n != null && n > 0;
+    }
+
+    /** Delete a template row from the writable tier (no-op for archived rows). */
+    public void deleteFromWritableTier(long templateId) {
+        jdbc.update("DELETE FROM " + writeTarget.tableFor("templates")
+                + " WHERE template_id = :id", Map.of("id", templateId));
+    }
+
     public long count() {
         Long n = jdbc.queryForObject("SELECT COUNT(*) FROM templates", Map.of(), Long.class);
         return n == null ? 0 : n;

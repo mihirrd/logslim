@@ -13,7 +13,16 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
+/**
+ * Two-pass ingest. Pass 1 streams the input through the learning stage
+ * (mask + count distinct shapes, no writes) so the template set is learned from
+ * the whole corpus; pass 2 re-streams and stores entries against the learned
+ * templates. This keeps the template set a deterministic function of the data —
+ * no per-dataset configuration. Stdin is spooled to a temp file so it can be
+ * read twice.
+ */
 @Component
 @Command(name = "run", mixinStandardHelpOptions = true,
          description = "Ingest logs and store them deduplicated into the output database.")
@@ -35,39 +44,66 @@ public class RunCommand implements Runnable {
 
     @Override
     public void run() {
-        try (BufferedReader reader = openReader()) {
-            String source = "-".equals(inputPath) ? "stdin" : inputPath;
-            List<LogGroup> batch = new ArrayList<>(batchSize);
-            long total = 0;
-
-            for (LogGroup group : new MultiLineGrouper(reader, source)) {
-                batch.add(group);
-                if (batch.size() >= batchSize) {
-                    extractor.processBatch(batch);
-                    total += batch.size();
-                    batch.clear();
-                    System.out.printf("\rIngested %,d groups...", total);
+        Path spooled = null;
+        try {
+            Path input;
+            String source;
+            if ("-".equals(inputPath)) {
+                spooled = spoolStdin();
+                input = spooled;
+                source = "stdin";
+            } else {
+                input = Paths.get(inputPath);
+                if (!Files.exists(input)) {
+                    throw new IOException("File not found: " + inputPath);
                 }
+                source = inputPath;
             }
-            if (!batch.isEmpty()) {
-                extractor.processBatch(batch);
-                total += batch.size();
+
+            long learned = streamGroups(input, source, extractor::learnBatch, "Learning from");
+            extractor.finishLearning();
+            long total = streamGroups(input, source, extractor::processBatch, "Ingested");
+
+            if (learned != total) {
+                log.warn("Group count differs between passes: {} learned vs {} ingested", learned, total);
             }
             System.out.printf("%nDone. Ingested %,d groups.%n", total);
         } catch (IOException | UncheckedIOException e) {
             System.err.println("Error reading input: " + e.getMessage());
             System.exit(1);
+        } finally {
+            if (spooled != null) {
+                try { Files.deleteIfExists(spooled); } catch (IOException ignored) { }
+            }
         }
     }
 
-    private BufferedReader openReader() throws IOException {
-        if ("-".equals(inputPath)) {
-            return new BufferedReader(new InputStreamReader(System.in));
+    private long streamGroups(Path input, String source,
+                              Consumer<List<LogGroup>> sink, String verb) throws IOException {
+        try (BufferedReader reader = Files.newBufferedReader(input)) {
+            List<LogGroup> batch = new ArrayList<>(batchSize);
+            long total = 0;
+            for (LogGroup group : new MultiLineGrouper(reader, source)) {
+                batch.add(group);
+                if (batch.size() >= batchSize) {
+                    sink.accept(batch);
+                    total += batch.size();
+                    batch = new ArrayList<>(batchSize);
+                    System.out.printf("\r%s %,d groups...", verb, total);
+                }
+            }
+            if (!batch.isEmpty()) {
+                sink.accept(batch);
+                total += batch.size();
+            }
+            System.out.printf("\r%s %,d groups.%n", verb, total);
+            return total;
         }
-        Path path = Paths.get(inputPath);
-        if (!Files.exists(path)) {
-            throw new IOException("File not found: " + inputPath);
-        }
-        return Files.newBufferedReader(path);
+    }
+
+    private static Path spoolStdin() throws IOException {
+        Path tmp = Files.createTempFile("logslim-stdin-", ".log");
+        Files.copy(System.in, tmp, StandardCopyOption.REPLACE_EXISTING);
+        return tmp;
     }
 }

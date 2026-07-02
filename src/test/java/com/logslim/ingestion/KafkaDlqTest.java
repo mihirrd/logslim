@@ -14,24 +14,19 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
-
-
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Tests the Kafka dead letter queue path: records that cannot yet be structured
- * (pre-lock) or exceed the template cap are stored in raw_logs.
- *
- * lock-after-n=2 means the first occurrence of any pattern goes to raw_logs
- * (DLQ) and the second locks the cluster, going to log_entries.
+ * Tests the Kafka dead-letter path under the deterministic parser: every record
+ * is structured immediately (there is no lock gate and no learn-in-flight raw
+ * pile), so raw_logs receives a record only when the template-count cap is
+ * exceeded — and must then preserve the Kafka source and timestamp.
  */
 @SpringBootTest
 @TestPropertySource(properties = {
         "spring.datasource.url=jdbc:duckdb:",
         "spring.datasource.hikari.maximum-pool-size=1",
-        "logslim.template.max-count=10",
-        "logslim.drain.lock-after-n=2",
-        "logslim.drain.sim-threshold=0.6"
+        "logslim.template.max-count=10"
 })
 class KafkaDlqTest {
 
@@ -48,62 +43,28 @@ class KafkaDlqTest {
     }
 
     @Test
-    void firstOccurrence_storedInRawLogs_notLogEntries() {
+    void firstOccurrence_storedStructured_notDlq() {
         extractor.processBatch(List.of(
                 LogGroup.singleLine("ERROR user 123 not found", "kafka-app", Instant.now())
         ));
-        assertThat(rawLogDao.count()).isEqualTo(1);
-        assertThat(logEntryCount()).isZero();
+        assertThat(rawLogDao.count()).isZero();
+        assertThat(logEntryCount()).isEqualTo(1);
     }
 
     @Test
-    void firstOccurrence_kafkaSourcePreservedInDlq() {
-        extractor.processBatch(List.of(
-                LogGroup.singleLine("ERROR user 1 not found", "kafka-payments", Instant.now())
-        ));
-        List<RawLog> raws = rawLogDao.findByTimeRange(Instant.EPOCH, Instant.parse("9999-01-01T00:00:00Z"));
-        assertThat(raws).hasSize(1);
-        assertThat(raws.get(0).getSource()).isEqualTo("kafka-payments");
-    }
-
-    @Test
-    void firstOccurrence_kafkaTimestampPreservedInDlq() {
-        Instant kafkaTs = Instant.parse("2024-12-25T08:15:00Z");
-        extractor.processBatch(List.of(
-                LogGroup.singleLine("ERROR user 1 not found", "kafka-jobs", kafkaTs)
-        ));
-        List<RawLog> raws = rawLogDao.findByTimeRange(Instant.EPOCH, Instant.parse("9999-01-01T00:00:00Z"));
-        assertThat(raws).hasSize(1);
-        assertThat(raws.get(0).getLogTimestamp()).isEqualTo(kafkaTs);
-    }
-
-    @Test
-    void secondOccurrence_locksTemplate_storedAsLogEntry() {
+    void variantsOfSamePattern_shareOneTemplateFromTheFirstRecord() {
         Instant ts = Instant.parse("2025-01-01T00:00:00Z");
         extractor.processBatch(List.of(
                 LogGroup.singleLine("ERROR user 1 not found", "kafka-app", ts),
                 LogGroup.singleLine("ERROR user 2 not found", "kafka-app", ts)
         ));
-        // First → DLQ (cluster not locked), second → locks cluster → log_entry
-        assertThat(rawLogDao.count()).isEqualTo(1);
-        assertThat(logEntryCount()).isEqualTo(1);
-    }
-
-    @Test
-    void mixedBatch_firstOccurrenceToDlq_subsequentToEntries() {
-        Instant ts = Instant.parse("2025-06-01T00:00:00Z");
-        extractor.processBatch(List.of(
-                LogGroup.singleLine("WARN connection pool limit 1 reached", "kafka-svc", ts),
-                LogGroup.singleLine("WARN connection pool limit 2 reached", "kafka-svc", ts),
-                LogGroup.singleLine("WARN connection pool limit 3 reached", "kafka-svc", ts)
-        ));
-        // First → DLQ, 2nd locks → log_entry, 3rd matches locked cluster → log_entry
-        assertThat(rawLogDao.count()).isEqualTo(1);
+        assertThat(rawLogDao.count()).isZero();
         assertThat(logEntryCount()).isEqualTo(2);
+        assertThat(templateCount()).isEqualTo(1);
     }
 
     @Test
-    void multiLineRecord_preLock_onlyHeaderStoredInDlq() {
+    void multiLineRecord_firstOccurrence_storedAsLogEntry_notDlq() {
         Instant kafkaTs = Instant.parse("2025-05-10T14:00:00Z");
         LogGroup multiLine = new LogGroup(
                 "ERROR database connection failed",
@@ -112,30 +73,37 @@ class KafkaDlqTest {
                 kafkaTs
         );
         extractor.processBatch(List.of(multiLine));
-        List<RawLog> raws = rawLogDao.findByTimeRange(Instant.EPOCH, Instant.parse("9999-01-01T00:00:00Z"));
-        assertThat(raws).hasSize(1);
-        assertThat(raws.get(0).getContent()).isEqualTo("ERROR database connection failed");
-        assertThat(raws.get(0).getSource()).isEqualTo("kafka-db");
-        assertThat(raws.get(0).getLogTimestamp()).isEqualTo(kafkaTs);
-    }
-
-    @Test
-    void multiLineRecord_locked_storedAsLogEntry_notDlq() {
-        Instant ts = Instant.now();
-        // Two multi-line records with same header pattern: first → DLQ, second locks → log_entry
-        extractor.processBatch(List.of(
-                new LogGroup("ERROR database connection failed",
-                        List.of("\tat com.example.Dao(Dao.java:42)"), "kafka-db", ts),
-                new LogGroup("ERROR database connection failed",
-                        List.of("\tat com.example.Dao(Dao.java:55)"), "kafka-db", ts)
-        ));
-        assertThat(rawLogDao.count()).isEqualTo(1);
+        assertThat(rawLogDao.count()).isZero();
         assertThat(logEntryCount()).isEqualTo(1);
     }
 
     @Test
     void templateCapExceeded_newPatternStoredInDlq() {
-        // Fill the template cap: 10 unique patterns × 2 occurrences each
+        fillTemplateCap();
+
+        extractor.processBatch(List.of(
+                LogGroup.singleLine("overflow request failed now completely", "kafka-overflow", Instant.now()),
+                LogGroup.singleLine("overflow request failed now completely", "kafka-overflow", Instant.now())
+        ));
+        assertThat(rawLogDao.count()).isEqualTo(2);
+    }
+
+    @Test
+    void capOverflow_kafkaSourceAndTimestampPreservedInDlq() {
+        fillTemplateCap();
+
+        Instant kafkaTs = Instant.parse("2024-12-25T08:15:00Z");
+        extractor.processBatch(List.of(
+                LogGroup.singleLine("overflow request failed now completely", "kafka-payments", kafkaTs)
+        ));
+        List<RawLog> raws = rawLogDao.findByTimeRange(Instant.EPOCH, Instant.parse("9999-01-01T00:00:00Z"));
+        assertThat(raws).hasSize(1);
+        assertThat(raws.get(0).getSource()).isEqualTo("kafka-payments");
+        assertThat(raws.get(0).getLogTimestamp()).isEqualTo(kafkaTs);
+    }
+
+    /** Ten entity-free lines → ten distinct identity templates → cap (max-count=10) reached. */
+    private void fillTemplateCap() {
         String[] setupPatterns = {
             "alpha service restarted successfully",
             "beta cache eviction triggered now",
@@ -149,23 +117,19 @@ class KafkaDlqTest {
             "kappa lease renewal succeeded successfully"
         };
         for (String line : setupPatterns) {
-            extractor.processBatch(List.of(
-                    LogGroup.singleLine(line, "src", Instant.now()),
-                    LogGroup.singleLine(line, "src", Instant.now())
-            ));
+            extractor.processBatch(List.of(LogGroup.singleLine(line, "src", Instant.now())));
         }
-        jdbc.update("DELETE FROM raw_logs", Map.of());
-
-        // Sending a new pattern: first → DLQ (pre-lock), second → hits cap → DLQ
-        extractor.processBatch(List.of(
-                LogGroup.singleLine("overflow request failed now completely", "kafka-overflow", Instant.now()),
-                LogGroup.singleLine("overflow request failed now completely", "kafka-overflow", Instant.now())
-        ));
-        assertThat(rawLogDao.count()).isEqualTo(2);
+        assertThat(templateCount()).isEqualTo(10);
+        assertThat(rawLogDao.count()).isZero();
     }
 
     private long logEntryCount() {
         Long n = jdbc.queryForObject("SELECT COUNT(*) FROM log_entries", Map.of(), Long.class);
+        return n == null ? 0 : n;
+    }
+
+    private long templateCount() {
+        Long n = jdbc.queryForObject("SELECT COUNT(*) FROM templates", Map.of(), Long.class);
         return n == null ? 0 : n;
     }
 }

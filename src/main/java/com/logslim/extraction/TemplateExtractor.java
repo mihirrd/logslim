@@ -5,15 +5,17 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.Collectors;
 
 import com.logslim.ingestion.LogGroup;
-import com.logslim.parsing.DrainTree;
-import com.logslim.parsing.LogTokenizer;
+import com.logslim.parsing.EntityMasker;
 import com.logslim.parsing.ParsedLog;
-import com.logslim.parsing.Token;
+import com.logslim.parsing.LogTokenizer;
+import com.logslim.parsing.TemplateLearner;
 import com.logslim.reconstruction.LogReconstructor;
 import com.logslim.storage.LogEntry;
 import com.logslim.storage.LogEntryDao;
@@ -31,17 +33,27 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 
 /**
- * Orchestrates the full extraction pipeline for a single log line:
- * parse → pre-mask → Drain matching → template DB sync → store log entry
+ * Orchestrates the extraction pipeline for a log line:
+ * mask → (learned) template lookup → template DB sync → store log entry
  *
- * Pre-masking converts tokens already classified as DYNAMIC by TokenClassifier
- * into wildcards before passing to Drain, so the regex knowledge bootstraps
- * the algorithm and is not re-learned from scratch.
+ * <p>Two deterministic layers replace the old Drain tree:
+ * <ol>
+ *   <li>{@link EntityMasker} masks universal syntax (numbers, IPs, timestamps,
+ *       UUIDs, paths) — the masked shape is the provisional template key.</li>
+ *   <li>{@link TemplateLearner} (fed by a learning pass over the corpus)
+ *       discovers dataset-specific variables statistically and merges shapes
+ *       that differ only at high-cardinality positions into one template with
+ *       {@code {var}} slots.</li>
+ * </ol>
  *
- * Lines processed while a Drain cluster is still learning (pre-lock) are stored
- * as raw_logs. Once a cluster locks it is written to the templates table and
- * all
- * subsequent matching lines are stored as structured log_entries.
+ * <p>There is no lock gate and no learn-in-flight raw pile: every line maps to
+ * a template by construction. A line goes to {@code raw_logs} only when the
+ * byte-exact round-trip safety net fails or the template-count cap is hit.
+ *
+ * <p>File ingest calls {@link #learnBatch} over the whole input first, then
+ * {@link #finishLearning()}, then {@link #processBatch}. Streaming ingest
+ * (Kafka) skips the learning pass: unseen patterns are matched against already
+ * learned templates and otherwise become their own (identity) templates.
  */
 @Component
 public class TemplateExtractor {
@@ -49,8 +61,7 @@ public class TemplateExtractor {
     private static final Logger log = LoggerFactory.getLogger(TemplateExtractor.class);
 
     private final LogTokenizer tokenizer;
-    private final TemplateNormalizer normalizer;
-    private final DrainTree drainTree;
+    private final EntityMasker masker;
     private final TemplateCache cache;
     private final TemplateDao templateDao;
     private final LogEntryDao logEntryDao;
@@ -63,27 +74,45 @@ public class TemplateExtractor {
     @Value("${logslim.ingestion.worker-threads:8}")
     private int workerThreads;
 
-    /** Maps Drain raw pattern (e.g. "User <*> login") → persisted Template. */
-    private final Map<String, Template> drainPatternToTemplate = new ConcurrentHashMap<>();
+    /**
+     * A varying token position with at most this many distinct values across the
+     * corpus is message semantics (templates stay separate); above it, it is a
+     * learned variable (templates merge). See {@link TemplateLearner}.
+     */
+    @Value("${logslim.parser.max-branching:8}")
+    private int maxBranching;
+
+    /** Masked source pattern → persisted template (identity or merged). */
+    private final Map<String, Template> patternToTemplate = new ConcurrentHashMap<>();
+
+    /** Masked source pattern → merge plan; absent for identity patterns. */
+    private final Map<String, TemplateLearner.MergePlan> plans = new ConcurrentHashMap<>();
+
+    /** Final template pattern → persisted template (dedups creation across source patterns). */
+    private final Map<String, Template> finalPatternToTemplate = new ConcurrentHashMap<>();
+
+    /** Merged templates in matchable form, for patterns first seen after learning. */
+    private final List<TemplateLearner.LearnedTemplate> learnedTemplates = new CopyOnWriteArrayList<>();
+
+    /** Distinct masked patterns accumulated by {@link #learnBatch} until {@link #finishLearning}. */
+    private final Set<String> pendingPatterns = ConcurrentHashMap.newKeySet();
 
     /**
-     * Dedicated pool for the stateless parse stage (tokenize + pre-mask).
+     * Dedicated pool for the stateless parse stage (tokenize + mask).
      * Sized to workerThreads so parallelism is bounded and the common pool is not starved.
      * Created in @PostConstruct (after @Value injection) and shut down in @PreDestroy.
      */
     private ForkJoinPool parsePool;
 
     public TemplateExtractor(LogTokenizer tokenizer,
-            TemplateNormalizer normalizer,
-            DrainTree drainTree,
+            EntityMasker masker,
             TemplateCache cache,
             TemplateDao templateDao,
             LogEntryDao logEntryDao,
             RawLogDao rawLogDao,
             LogReconstructor reconstructor) {
         this.tokenizer = tokenizer;
-        this.normalizer = normalizer;
-        this.drainTree = drainTree;
+        this.masker = masker;
         this.cache = cache;
         this.templateDao = templateDao;
         this.logEntryDao = logEntryDao;
@@ -91,19 +120,57 @@ public class TemplateExtractor {
         this.reconstructor = reconstructor;
     }
 
-    /** Seed the Drain tree from all templates already stored in the DB, and create the parse pool. */
+    /**
+     * Seed lookup state from all templates already stored in the DB, and create the parse pool.
+     *
+     * <p>Two phases: merged ({@code {var}}) templates first, then identity templates.
+     * An identity template whose pattern fits an already-learned merged template maps
+     * to the merged one — so fold-forward remaps from {@link #relearn()} survive
+     * restarts, and future lines never re-fragment. The identity row itself stays
+     * (its archived entries reconstruct through its own pattern).
+     */
     @PostConstruct
-    void bootstrapDrain() {
+    void bootstrap() {
         parsePool = new ForkJoinPool(workerThreads);
         List<Template> all = templateDao.findAll();
-        drainTree.bootstrap(all);
+        List<Template> identities = new java.util.ArrayList<>();
         for (Template t : all) {
-            String rawPattern = rawPattern(DrainTree.toWildcardTokens(t.getPattern()));
-            drainPatternToTemplate.put(rawPattern, t);
+            TemplateLearner.LearnedTemplate lt = TemplateLearner.fromFinalPattern(t.getPattern());
+            if (lt != null) {
+                finalPatternToTemplate.put(t.getPattern(), t);
+                learnedTemplates.add(lt);
+            } else {
+                identities.add(t);
+            }
+        }
+        int remapped = 0;
+        for (Template t : identities) {
+            TemplateLearner.MergePlan plan = matchLearned(t.getPattern());
+            if (plan != null) {
+                Template canonical = finalPatternToTemplate.get(plan.finalPattern());
+                plans.put(t.getPattern(), plan);
+                patternToTemplate.put(t.getPattern(), canonical);
+                remapped++;
+            } else {
+                finalPatternToTemplate.put(t.getPattern(), t);
+                patternToTemplate.put(t.getPattern(), t);
+            }
         }
         if (!all.isEmpty()) {
-            log.info("Bootstrapped Drain tree with {} existing templates", all.size());
+            log.info("Bootstrapped {} templates ({} merged, {} identity remapped forward)",
+                    all.size(), learnedTemplates.size(), remapped);
         }
+    }
+
+    /** Match a masked pattern against the learned merged templates; null when none fit. */
+    private TemplateLearner.MergePlan matchLearned(String pattern) {
+        if (learnedTemplates.isEmpty()) return null;
+        String[] toks = TemplateLearner.split(pattern);
+        for (TemplateLearner.LearnedTemplate lt : learnedTemplates) {
+            TemplateLearner.MergePlan plan = lt.tryMatch(toks);
+            if (plan != null) return plan;
+        }
+        return null;
     }
 
     @PreDestroy
@@ -118,12 +185,157 @@ public class TemplateExtractor {
      * Does NOT touch the database — callers must clear tables separately.
      */
     public void reset() {
-        drainTree.reset();
-        drainPatternToTemplate.clear();
+        patternToTemplate.clear();
+        plans.clear();
+        finalPatternToTemplate.clear();
+        learnedTemplates.clear();
+        pendingPatterns.clear();
         cache.clearAll();
     }
 
-    // — public API ————————————————————————————————————————————
+    // — learning pass ————————————————————————————————————————————
+
+    /** Pass-1 for file ingest: mask the batch and accumulate distinct patterns. Writes nothing. */
+    public void learnBatch(List<LogGroup> groups) {
+        List<String> patterns;
+        try {
+            patterns = parsePool.submit(() ->
+                groups.parallelStream()
+                      .map(g -> masker.mask(g.headerLine()).pattern())
+                      .collect(Collectors.toList())
+            ).get();
+        } catch (Exception e) {
+            throw new RuntimeException("Parallel learn stage failed", e);
+        }
+        pendingPatterns.addAll(patterns);
+    }
+
+    /**
+     * Run {@link TemplateLearner} over all patterns seen by {@link #learnBatch}.
+     * Deterministic: the learned template set is a pure function of the corpus.
+     */
+    public void finishLearning() {
+        if (pendingPatterns.isEmpty()) return;
+        TemplateLearner learner = new TemplateLearner(maxBranching);
+        Map<String, TemplateLearner.MergePlan> learned = learner.learn(pendingPatterns);
+        plans.putAll(learned);
+        Set<String> seenFinals = new java.util.HashSet<>();
+        for (TemplateLearner.MergePlan p : learned.values()) {
+            if (seenFinals.add(p.finalPattern())) {
+                learnedTemplates.add(new TemplateLearner.LearnedTemplate(p));
+            }
+        }
+        log.info("Learned {} merged templates from {} distinct masked patterns",
+                seenFinals.size(), pendingPatterns.size());
+        pendingPatterns.clear();
+    }
+
+    // — incremental relearn (streaming ingest) ————————————————————
+
+    /**
+     * Outcome of one {@link #relearn()} round.
+     *
+     * @param mergedTemplates merged templates created (or reused) this round
+     * @param folded          identity templates fully folded: entries rewritten, row deleted
+     * @param remappedForward identity templates with archived (immutable) entries: the row
+     *                        stays for reconstruction, but future lines map to the merged template
+     */
+    public record RelearnResult(int mergedTemplates, int folded, int remappedForward) {
+        public boolean changedAnything() {
+            return mergedTemplates + folded + remappedForward > 0;
+        }
+    }
+
+    /**
+     * Learn over the identity templates accumulated so far and fold fragmented
+     * families into merged {@code {var}} templates. The streaming counterpart of
+     * the file-ingest learning pass: run it periodically (the Kafka runner calls
+     * it before each compact), and each round builds on all prior rounds — shapes
+     * that already match a learned template never become identity templates, so
+     * the learner only ever reconsiders the unmerged residue.
+     *
+     * <p>Fold semantics per fragment:
+     * <ul>
+     *   <li><b>Fully live</b> (template row and all entries still in the writable
+     *       tier): entries are rewritten onto the merged template with re-planned
+     *       params (byte-exact round-trip preserved), occurrences move, and the
+     *       fragment row is deleted.</li>
+     *   <li><b>Partially archived</b> (survived an earlier compact): Parquet
+     *       partitions are immutable, so the fragment row and its history stay
+     *       frozen for reconstruction; only future lines are remapped. Counts for
+     *       such a family split at the fold boundary — compare patterns, not ids,
+     *       across folds.</li>
+     * </ul>
+     *
+     * Monotone: existing merged templates are never split back apart.
+     * Single-writer by design (same thread as ingest), like everything else here.
+     */
+    public RelearnResult relearn() {
+        // Active identity templates: not merged, and not already remapped forward.
+        List<Template> identities = new java.util.ArrayList<>();
+        for (Template t : templateDao.findAll()) {
+            if (TemplateLearner.fromFinalPattern(t.getPattern()) != null) continue;
+            Template mapped = patternToTemplate.get(t.getPattern());
+            if (mapped != null && !mapped.getId().equals(t.getId())) continue; // already folded forward
+            identities.add(t);
+        }
+        Map<String, TemplateLearner.MergePlan> learned = new TemplateLearner(maxBranching)
+                .learn(identities.stream().map(Template::getPattern).toList());
+        if (learned.isEmpty()) return new RelearnResult(0, 0, 0);
+
+        int created = 0, folded = 0, remapped = 0;
+        Set<String> newFinals = new java.util.HashSet<>();
+        Map<Long, Long> occurrenceMoves = new LinkedHashMap<>();
+
+        for (Template fragment : identities) {
+            TemplateLearner.MergePlan plan = learned.get(fragment.getPattern());
+            if (plan == null) continue;
+
+            Template canonical = finalPatternToTemplate.get(plan.finalPattern());
+            if (canonical == null) {
+                // occurrences start at 0 — folds below move the real counts over
+                canonical = cache.put(new Template(null, plan.finalPattern(), 0,
+                        Instant.now(), Instant.now()));
+                finalPatternToTemplate.put(plan.finalPattern(), canonical);
+                created++;
+            }
+            if (newFinals.add(plan.finalPattern())) {
+                learnedTemplates.add(new TemplateLearner.LearnedTemplate(plan));
+            }
+
+            boolean fullyLive = templateDao.existsInWritableTier(fragment.getId())
+                    && logEntryDao.countArchivedByTemplateId(fragment.getId()) == 0;
+            if (fullyLive) {
+                List<LogEntry> entries = logEntryDao.findWritableByTemplateId(fragment.getId());
+                for (LogEntry e : entries) {
+                    e.setTemplateId(canonical.getId());
+                    e.setParameterValues(TemplateLearner.buildParams(
+                            fragment.getPattern(), e.getParameterValues(), plan));
+                }
+                logEntryDao.refileEntries(fragment.getId(), entries);
+                occurrenceMoves.merge(canonical.getId(), fragment.getOccurrences(), Long::sum);
+                templateDao.deleteFromWritableTier(fragment.getId());
+                finalPatternToTemplate.remove(fragment.getPattern());
+                cache.invalidate(fragment.getPattern());
+                folded++;
+            } else {
+                remapped++;
+            }
+            plans.put(fragment.getPattern(), plan);
+            patternToTemplate.put(fragment.getPattern(), canonical);
+        }
+
+        if (!occurrenceMoves.isEmpty()) {
+            templateDao.incrementOccurrencesBatch(occurrenceMoves);
+            cache.refreshBatch(occurrenceMoves);
+        }
+        RelearnResult result = new RelearnResult(created, folded, remapped);
+        log.info("Relearn: {} merged templates created, {} identity templates folded, {} remapped forward",
+                created, folded, remapped);
+        return result;
+    }
+
+    // — public processing API ————————————————————————————————————
 
     public Template process(String rawLine, String source) {
         return process(LogGroup.singleLine(rawLine, source));
@@ -134,37 +346,17 @@ public class TemplateExtractor {
         // Single-line path has no batch context to carry forward from, so an unstamped line
         // falls back to ingest time — but only after being flagged/counted in the tokenizer.
         Instant ts = resolveTimestamp(group.sourceTimestamp(), parsed, null, Instant.now());
-        List<Token> orig = parsed.tokens();
-        List<String> masked = toPreMasked(orig);
 
-        DrainTree.ProcessResult drain = drainTree.process(masked);
-
-        if (!drain.isLocked()) {
+        EntityMasker.MaskResult mr = masker.mask(group.headerLine());
+        Resolved r = resolve(mr.pattern());
+        if (r == null) {
             storeRaw(group.headerLine(), group.source(), ts);
             return null;
         }
 
-        Template template = resolveTemplate(drain, orig, group.headerLine());
-        if (template == null) {
-            storeRaw(group.headerLine(), group.source(), ts);
-            return null;
-        }
-
-        List<String> paramValues = extractParamValues(drain.templateTokens(), orig);
-
-        // Safety net: only store as a structured entry if the header round-trips byte-exactly.
-        // Falls back to raw for any mismatch or reconstruction failure (guarantees losslessness).
-        String reconstructedHeader;
-        try {
-            reconstructedHeader = reconstructor.reconstruct(template.getPattern(), paramValues);
-        } catch (RuntimeException e) {
-            reconstructedHeader = null;
-        }
-        if (!group.headerLine().equals(reconstructedHeader)) {
-            String rawContent = group.isMultiLine()
-                    ? group.headerLine() + "\n" + String.join("\n", group.continuationLines())
-                    : group.headerLine();
-            storeRaw(rawContent, group.source(), ts);
+        List<String> paramValues = finalParams(mr, r);
+        if (!roundTrips(group.headerLine(), r.template(), paramValues)) {
+            storeRaw(rawContent(group), group.source(), ts);
             return null;
         }
 
@@ -172,51 +364,26 @@ public class TemplateExtractor {
                 ? String.join("\n", group.continuationLines())
                 : null;
         logEntryDao.insert(new LogEntry(
-                null, template.getId(), ts, paramValues, continuation));
+                null, r.template().getId(), ts, paramValues, continuation));
 
-        if (!drain.justLocked()) {
-            cache.refresh(template);
+        if (!r.created()) {
+            cache.refresh(r.template());
         }
-        return template;
+        return r.template();
     }
-
-    /**
-     * Resolve the event timestamp for a group: prefer a source-provided timestamp (e.g. a Kafka
-     * record's UTC epoch), else the timestamp parsed from the line, else carry forward the last
-     * known event time (so unstamped/continuation lines stay in chronological order), else a
-     * stable fallback. Never silently stamps an unparseable line with the wall-clock "now".
-     */
-    private static Instant resolveTimestamp(Instant sourceTs, ParsedLog parsed,
-                                            Instant lastKnownTs, Instant fallback) {
-        if (sourceTs != null) return sourceTs;
-        if (parsed.timestampResolved()) return parsed.timestamp();
-        return lastKnownTs != null ? lastKnownTs : fallback;
-    }
-
-    /**
-     * Intermediate holder produced by the parallel parse stage.
-     * Carries everything the sequential Drain+write stage needs; nothing stateful is touched here.
-     */
-    private record ParsedHolder(
-            LogGroup group,
-            ParsedLog parsed,
-            List<Token> orig,
-            List<String> masked
-    ) {}
 
     /**
      * Two-stage batch processor.
      *
-     * Stage 1 (parallel, CPU): tokenize + toPreMasked for every group concurrently.
+     * Stage 1 (parallel, CPU): tokenize + mask every group concurrently.
      *   These are pure functions over precompiled patterns — safe to run in parallel.
      *   The dedicated ForkJoinPool (sized to workerThreads) bounds parallelism and
      *   avoids starving the JVM common pool. The stream is ordered, so the resulting
      *   list preserves input order exactly.
      *
-     * Stage 2 (sequential, calling thread): iterate ParsedHolders in input order,
-     *   run drainTree.process (stateful, order-dependent), resolve/create templates,
-     *   and accumulate log entries — identical logic to before. Drain learning order
-     *   is fully deterministic because this stage is single-threaded and in-order.
+     * Stage 2 (sequential, calling thread): iterate in input order, resolve or create
+     *   templates (hash lookups — deterministic regardless of order), and accumulate
+     *   log entries.
      */
     public void processBatch(List<LogGroup> groups) {
         // — Stage 1: parallel stateless parse (order-preserving) —
@@ -224,17 +391,16 @@ public class TemplateExtractor {
         try {
             parsed = parsePool.submit(() ->
                 groups.parallelStream()
-                      .map(g -> {
-                          ParsedLog p = tokenizer.tokenize(g.headerLine(), g.source());
-                          return new ParsedHolder(g, p, p.tokens(), toPreMasked(p.tokens()));
-                      })
+                      .map(g -> new ParsedHolder(g,
+                              tokenizer.tokenize(g.headerLine(), g.source()),
+                              masker.mask(g.headerLine())))
                       .collect(Collectors.toList())
             ).get();
         } catch (Exception e) {
             throw new RuntimeException("Parallel parse stage failed", e);
         }
 
-        // — Stage 2: sequential Drain matching + DB accumulation (in input order) —
+        // — Stage 2: sequential template resolution + DB accumulation (in input order) —
         List<LogEntry> entries = new ArrayList<>();
         List<RawLog>   raws    = new ArrayList<>();
         Map<Long, Long> occurrenceDeltas = new LinkedHashMap<>();
@@ -249,53 +415,29 @@ public class TemplateExtractor {
 
         for (ParsedHolder h : parsed) {
             LogGroup group = h.group();
-            List<Token> orig = h.orig();
-            List<String> masked = h.masked();
-            ParsedLog p = h.parsed();
-            // Prefer the source-provided timestamp (e.g. Kafka record UTC epoch); else the
-            // timestamp parsed from the line; else carry forward the last known event time.
-            Instant ts = resolveTimestamp(group.sourceTimestamp(), p, lastKnownTs, batchFallback);
-            if (group.sourceTimestamp() != null || p.timestampResolved()) {
+            Instant ts = resolveTimestamp(group.sourceTimestamp(), h.parsed(), lastKnownTs, batchFallback);
+            if (group.sourceTimestamp() != null || h.parsed().timestampResolved()) {
                 lastKnownTs = ts;
             }
 
-            DrainTree.ProcessResult drain = drainTree.process(masked);
-
-            if (!drain.isLocked()) {
+            Resolved r = resolve(h.mask().pattern());
+            if (r == null) {
                 raws.add(new RawLog(null, group.headerLine(), ts, group.source(), Instant.now()));
                 continue;
             }
 
-            Template template = resolveTemplate(drain, orig, group.headerLine());
-            if (template == null) {
-                raws.add(new RawLog(null, group.headerLine(), ts, group.source(), Instant.now()));
-                continue;
-            }
-
-            List<String> paramValues = extractParamValues(drain.templateTokens(), orig);
-
-            // Safety net: only store as a structured entry if the header round-trips byte-exactly.
-            // Falls back to raw for any mismatch or reconstruction failure (guarantees losslessness).
-            String reconstructedHeader;
-            try {
-                reconstructedHeader = reconstructor.reconstruct(template.getPattern(), paramValues);
-            } catch (RuntimeException e) {
-                reconstructedHeader = null;
-            }
-            if (!group.headerLine().equals(reconstructedHeader)) {
-                String rawContent = group.isMultiLine()
-                        ? group.headerLine() + "\n" + String.join("\n", group.continuationLines())
-                        : group.headerLine();
-                raws.add(new RawLog(null, rawContent, ts, group.source(), Instant.now()));
+            List<String> paramValues = finalParams(h.mask(), r);
+            if (!roundTrips(group.headerLine(), r.template(), paramValues)) {
+                raws.add(new RawLog(null, rawContent(group), ts, group.source(), Instant.now()));
                 continue;
             }
 
             String continuation = group.isMultiLine()
                     ? String.join("\n", group.continuationLines()) : null;
-            entries.add(new LogEntry(null, template.getId(), ts, paramValues, continuation));
+            entries.add(new LogEntry(null, r.template().getId(), ts, paramValues, continuation));
 
-            if (!drain.justLocked()) {
-                occurrenceDeltas.merge(template.getId(), 1L, Long::sum);
+            if (!r.created()) {
+                occurrenceDeltas.merge(r.template().getId(), 1L, Long::sum);
             }
         }
 
@@ -316,131 +458,91 @@ public class TemplateExtractor {
     // — private helpers ——————————————————————————————————————
 
     /**
-     * Return the persisted Template for this cluster, creating it in the DB
-     * on first lock. Returns null if the template-count cap is reached.
-     *
-     * @param rawLine the original log line used to build a whitespace-preserving pattern
+     * Intermediate holder produced by the parallel parse stage.
+     * Carries everything the sequential resolve+write stage needs; nothing stateful is touched here.
      */
-    private Template resolveTemplate(DrainTree.ProcessResult drain, List<Token> origTokens,
-            String rawLine) {
-        String raw = rawPattern(drain.templateTokens());
-        Template existing = drainPatternToTemplate.get(raw);
-        if (existing != null)
-            return existing;
+    private record ParsedHolder(LogGroup group, ParsedLog parsed, EntityMasker.MaskResult mask) {}
 
-        // Just locked — write to DB for the first time
-        if (drainPatternToTemplate.size() >= maxTemplateCount) {
-            log.warn("Template count at max ({}), falling back to raw storage", maxTemplateCount);
-            return null;
+    /**
+     * A source pattern resolved to its persisted template.
+     *
+     * @param plan    the merge plan when the pattern folds into a learned template, else null
+     * @param created true when this resolution created the template row (occurrences already 1)
+     */
+    private record Resolved(Template template, TemplateLearner.MergePlan plan, boolean created) {}
+
+    /**
+     * Resolve a masked source pattern to its template: direct hit, else learned
+     * plan (from this session's learning pass or by matching the pattern against
+     * merged templates), else a fresh identity template. Returns null only when
+     * a new template is needed but the count cap is reached.
+     */
+    private Resolved resolve(String pattern) {
+        Template direct = patternToTemplate.get(pattern);
+        if (direct != null) {
+            return new Resolved(direct, plans.get(pattern), false);
         }
 
-        String typed = buildTypedPattern(drain.templateTokens(), origTokens, rawLine);
-        Template template = cache.put(Template.newTemplate(typed));
-        drainPatternToTemplate.put(raw, template);
-        log.debug("New template [{}]: {}", template.getId(), typed);
-        return template;
+        TemplateLearner.MergePlan plan = plans.get(pattern);
+        if (plan == null) {
+            plan = matchLearned(pattern);
+            if (plan != null) plans.put(pattern, plan);
+        }
+
+        String finalPattern = plan != null ? plan.finalPattern() : pattern;
+        Template template = finalPatternToTemplate.get(finalPattern);
+        boolean created = false;
+        if (template == null) {
+            if (finalPatternToTemplate.size() >= maxTemplateCount) {
+                log.warn("Template count at max ({}), falling back to raw storage", maxTemplateCount);
+                return null;
+            }
+            template = cache.put(Template.newTemplate(finalPattern));
+            finalPatternToTemplate.put(finalPattern, template);
+            created = true;
+            log.debug("New template [{}]: {}", template.getId(), finalPattern);
+        }
+        patternToTemplate.put(pattern, template);
+        return new Resolved(template, plan, created);
     }
 
-    /** Replace typed {placeholder} tokens with <*> and join with spaces. */
-    private static String rawPattern(List<String> tokens) {
-        return String.join(" ", tokens);
+    /** Final slot values for a line: merged params under a plan, else the masked params as-is. */
+    private static List<String> finalParams(EntityMasker.MaskResult mr, Resolved r) {
+        return r.plan() != null
+                ? TemplateLearner.buildParams(mr.pattern(), mr.params(), r.plan())
+                : mr.params();
     }
 
     /**
-     * Replace each wildcard position with a typed placeholder name derived
-     * from the original token value at that position, while preserving the
-     * exact inter-token whitespace from the originating raw line.
-     *
-     * The resulting pattern encodes real whitespace (e.g. "INFO  [svc]" for a
-     * log format that pads INFO to 5 chars) so that LogReconstructor can emit
-     * the original line byte-for-byte without any normalisation.
-     *
-     * If the raw line cannot be walked token-by-token (e.g. an empty line or
-     * token count mismatch), falls back to single-space joining.
+     * Byte-exact round-trip safety net: a line is stored structured only if
+     * template + params reconstruct it exactly; anything else falls to raw_logs
+     * (guarantees losslessness).
      */
-    private String buildTypedPattern(List<String> templateTokens, List<Token> origTokens,
-            String rawLine) {
-        if (rawLine == null || rawLine.isEmpty() || templateTokens.isEmpty()) {
-            return buildTypedPatternNormalized(templateTokens, origTokens);
+    private boolean roundTrips(String headerLine, Template template, List<String> paramValues) {
+        try {
+            return headerLine.equals(reconstructor.reconstruct(template.getPattern(), paramValues));
+        } catch (RuntimeException e) {
+            return false;
         }
-
-        int n = templateTokens.size();
-        // Part values as extracted by the tokenizer (rawLine.trim().split("\\s+"))
-        String[] parts = rawLine.trim().split("\\s+");
-        if (parts.length != n) {
-            return buildTypedPatternNormalized(templateTokens, origTokens);
-        }
-
-        StringBuilder sb = new StringBuilder(rawLine.length() + 32);
-        int cursor = 0; // position in rawLine
-
-        for (int i = 0; i < n; i++) {
-            String tokenValue = parts[i];
-            // Find the start of this token in rawLine from current cursor
-            int tokenStart = rawLine.indexOf(tokenValue, cursor);
-            if (tokenStart < 0) {
-                // Shouldn't happen for well-formed lines; fall back
-                return buildTypedPatternNormalized(templateTokens, origTokens);
-            }
-            // Emit the gap (whitespace / leading chars) verbatim
-            sb.append(rawLine, cursor, tokenStart);
-            // Emit placeholder or static token
-            String tok = templateTokens.get(i);
-            if (DrainTree.WILDCARD.equals(tok)) {
-                Token orig = i < origTokens.size() ? origTokens.get(i) : null;
-                sb.append(orig != null ? normalizer.placeholderFor(orig) : "{val}");
-            } else {
-                sb.append(tokenValue);
-            }
-            cursor = tokenStart + tokenValue.length();
-        }
-        // Append trailing whitespace (if any)
-        if (cursor < rawLine.length()) {
-            sb.append(rawLine, cursor, rawLine.length());
-        }
-        return sb.toString();
     }
 
-    /** Fallback: join with single spaces (original behaviour). */
-    private String buildTypedPatternNormalized(List<String> templateTokens, List<Token> origTokens) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < templateTokens.size(); i++) {
-            if (i > 0) sb.append(' ');
-            String tok = templateTokens.get(i);
-            if (DrainTree.WILDCARD.equals(tok)) {
-                Token orig = i < origTokens.size() ? origTokens.get(i) : null;
-                sb.append(orig != null ? normalizer.placeholderFor(orig) : "{val}");
-            } else {
-                sb.append(tok);
-            }
-        }
-        return sb.toString();
+    private static String rawContent(LogGroup group) {
+        return group.isMultiLine()
+                ? group.headerLine() + "\n" + String.join("\n", group.continuationLines())
+                : group.headerLine();
     }
 
     /**
-     * Extract actual parameter values from the original tokens at wildcard
-     * positions.
+     * Resolve the event timestamp for a group: prefer a source-provided timestamp (e.g. a Kafka
+     * record's UTC epoch), else the timestamp parsed from the line, else carry forward the last
+     * known event time (so unstamped/continuation lines stay in chronological order), else a
+     * stable fallback. Never silently stamps an unparseable line with the wall-clock "now".
      */
-    private static List<String> extractParamValues(List<String> templateTokens, List<Token> origTokens) {
-        List<String> params = new ArrayList<>();
-        for (int i = 0; i < templateTokens.size(); i++) {
-            if (DrainTree.WILDCARD.equals(templateTokens.get(i))) {
-                params.add(i < origTokens.size() ? origTokens.get(i).value() : null);
-            }
-        }
-        return params;
-    }
-
-    /**
-     * Pre-mask tokens: tokens already classified as DYNAMIC become wildcards
-     * so Drain starts with regex-known dynamic positions already marked.
-     */
-    private static List<String> toPreMasked(List<Token> tokens) {
-        List<String> result = new ArrayList<>(tokens.size());
-        for (Token t : tokens) {
-            result.add(t.isDynamic() ? DrainTree.WILDCARD : t.value());
-        }
-        return result;
+    private static Instant resolveTimestamp(Instant sourceTs, ParsedLog parsed,
+                                            Instant lastKnownTs, Instant fallback) {
+        if (sourceTs != null) return sourceTs;
+        if (parsed.timestampResolved()) return parsed.timestamp();
+        return lastKnownTs != null ? lastKnownTs : fallback;
     }
 
     private void storeRaw(String content, String source, Instant ts) {

@@ -105,36 +105,34 @@ public class TemplateNormalizer {
      * structured-query slots, projection matching, and inspect_template all use it,
      * so the displayed name always equals the filterable key.
      *
-     * <p>A {@code {...}} counts as a slot ONLY when it is a complete whitespace-delimited
-     * token — the exact rule {@code LogReconstructor} uses for substitution points — so a
-     * literal {@code {id}} embedded inside a larger token (e.g. {@code /users/{id}}) is NOT
-     * a slot and slot index <em>k</em> lines up with {@code parameterValues[k]}.
+     * <p>Escaped-brace scheme (the {@code EntityMasker} contract): every single
+     * {@code {name}} is a slot — including mid-token, e.g. {@code {ip}:Got} — and
+     * literal source braces are stored doubled ({@code {{} / {@code }}}), so a
+     * literal {@code {id}} in the source text is NOT a slot and slot index
+     * <em>k</em> lines up with {@code parameterValues[k]}.
      */
     public List<String> slotNames(String pattern) {
         List<String> names = new ArrayList<>();
         java.util.Map<String, Integer> counters = new java.util.HashMap<>();
         int len = pattern.length();
         for (int i = 0; i < len; ) {
-            if (pattern.charAt(i) == '{' && (i == 0 || isSlotWhitespace(pattern.charAt(i - 1)))) {
-                int j = i + 1;
-                while (j < len && pattern.charAt(j) != '}' && !isSlotWhitespace(pattern.charAt(j))) j++;
-                if (j < len && pattern.charAt(j) == '}'
-                        && (j + 1 == len || isSlotWhitespace(pattern.charAt(j + 1)))) {
-                    String base = pattern.substring(i + 1, j);
-                    int count = counters.getOrDefault(base, 0);
-                    names.add(count == 0 ? base : base + "_" + count);
-                    counters.put(base, count + 1);
-                    i = j + 1;
-                    continue;
-                }
+            char c = pattern.charAt(i);
+            if (c == '{') {
+                if (i + 1 < len && pattern.charAt(i + 1) == '{') { i += 2; continue; }
+                int j = pattern.indexOf('}', i + 1);
+                if (j < 0) { i++; continue; }
+                String base = pattern.substring(i + 1, j);
+                int count = counters.getOrDefault(base, 0);
+                names.add(count == 0 ? base : base + "_" + count);
+                counters.put(base, count + 1);
+                i = j + 1;
+            } else if (c == '}') {
+                i += (i + 1 < len && pattern.charAt(i + 1) == '}') ? 2 : 1;
+            } else {
+                i++;
             }
-            i++;
         }
         return names;
-    }
-
-    private static boolean isSlotWhitespace(char c) {
-        return c == ' ' || c == '\t' || c == '\n';
     }
 
     /** Base name (without the {@code _N} de-dup suffix) for a canonical slot name. */

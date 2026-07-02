@@ -101,10 +101,12 @@ class TemplateNormalizerTest {
     }
 
     @Test
-    void slotNames_embeddedBraceIsNotASlot() {
-        // {id} inside the path token is a literal, not a substitution point — so the only
-        // slot is {status}, and index 0 must line up with parameterValues[0].
-        assertThat(normalizer.slotNames("GET /api/v1/users/{id} {status}")).containsExactly("status");
+    void slotNames_escapedBraceIsNotASlot() {
+        // A literal {id} in the source is stored escaped as {{id}} — not a substitution
+        // point — so the only slot is {status}, and index 0 lines up with parameterValues[0].
+        assertThat(normalizer.slotNames("GET /api/v1/users/{{id}} {status}")).containsExactly("status");
+        // and an intra-token slot IS a slot under the escaped-brace scheme
+        assertThat(normalizer.slotNames("{ip}:Got exception {num}")).containsExactly("ip", "num");
     }
 
     // — slotBaseName ————————————————————————————————————————————————

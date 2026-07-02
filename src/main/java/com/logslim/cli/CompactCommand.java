@@ -1,5 +1,6 @@
 package com.logslim.cli;
 
+import com.logslim.extraction.TemplateExtractor;
 import com.logslim.service.AdminService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -17,6 +18,7 @@ import java.util.Scanner;
 public class CompactCommand implements Runnable {
 
     private final AdminService adminService;
+    private final TemplateExtractor extractor;
 
     @Value("${logslim.db.path:logs.duckdb}")
     private String dbPath;
@@ -24,8 +26,9 @@ public class CompactCommand implements Runnable {
     @Option(names = { "--yes", "-y" }, description = "Skip confirmation prompt")
     private boolean yes;
 
-    public CompactCommand(AdminService adminService) {
+    public CompactCommand(AdminService adminService, TemplateExtractor extractor) {
         this.adminService = adminService;
+        this.extractor = extractor;
     }
 
     @Override
@@ -46,6 +49,14 @@ public class CompactCommand implements Runnable {
                 System.out.println("Aborted.");
                 return;
             }
+        }
+
+        // Fold fragmented identity templates into learned ones while their rows are
+        // still writable — after export they are sealed in immutable Parquet.
+        TemplateExtractor.RelearnResult relearn = extractor.relearn();
+        if (relearn.changedAnything()) {
+            System.out.printf("Relearn: %d merged template(s), %d folded, %d remapped forward.%n",
+                    relearn.mergedTemplates(), relearn.folded(), relearn.remappedForward());
         }
 
         boolean ran = adminService.compactDatabase(dataDir);

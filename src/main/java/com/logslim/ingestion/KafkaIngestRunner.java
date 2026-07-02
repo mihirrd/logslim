@@ -202,6 +202,17 @@ public class KafkaIngestRunner {
     }
 
     private void runCompact(Path dataDir) {
+        // Relearn BEFORE compact, while fragmented identity templates and their
+        // entries are still in the writable tier — folds are then full rewrites
+        // (entries re-planned onto merged templates) instead of forward-only
+        // remaps against immutable Parquet. Each round builds on the last: shapes
+        // matching an already-learned template never fragment again.
+        try {
+            extractor.relearn();
+        } catch (RuntimeException e) {
+            log.warn("relearn failed (ingest continues, will retry next interval): {}",
+                    e.getMessage(), e);
+        }
         try {
             long t0 = System.currentTimeMillis();
             adminService.compactDatabase(dataDir);
