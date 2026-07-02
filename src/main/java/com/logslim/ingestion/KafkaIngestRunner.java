@@ -215,8 +215,9 @@ public class KafkaIngestRunner {
         }
         try {
             long t0 = System.currentTimeMillis();
-            adminService.compactDatabase(dataDir);
-            log.info("compact completed in {} ms", System.currentTimeMillis() - t0);
+            if (adminService.compactDatabase(dataDir)) {
+                log.info("compact completed in {} ms", System.currentTimeMillis() - t0);
+            }
         } catch (RuntimeException e) {
             // Compact failures shouldn't kill the ingest loop — log and continue.
             log.warn("compact failed (will retry on next interval): {}", e.getMessage(), e);
